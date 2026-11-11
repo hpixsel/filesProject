@@ -27,8 +27,18 @@ pub fn send(dir: &Path) -> bool {
 }
 
 fn send_to(name: &str, dir: &Path) -> bool {
-    let Ok(mut pipe) = std::fs::OpenOptions::new().write(true).open(name) else {
-        return false;
+    const ERROR_PIPE_BUSY: i32 = 231;
+    // Busy for a moment while the window takes the previous message.
+    let mut tries = 0;
+    let mut pipe = loop {
+        match std::fs::OpenOptions::new().write(true).open(name) {
+            Ok(p) => break p,
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) && tries < 40 => {
+                tries += 1;
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(_) => return false,
+        }
     };
     // Lets the running window come to the front; this process has the
     // foreground right because the user just started it.
@@ -70,13 +80,20 @@ fn serve_at(name: &str, on_dir: impl Fn(PathBuf) + Send + 'static) -> Result<()>
     let pipe = unsafe { File::from_raw_handle(handle.0) };
     std::thread::spawn(move || loop {
         let handle = windows::Win32::Foundation::HANDLE(pipe.as_raw_handle());
-        // SAFETY: `pipe` keeps the handle open. "Already connected" (a client
-        // came before this call) is an error code but means go ahead.
+        // SAFETY: `pipe` keeps the handle open. A client that came before
+        // this call gives "already connected", or "no data" when it has
+        // already written and closed; its message is still buffered.
         let connected = unsafe { ConnectNamedPipe(handle, None) };
         if let Err(e) = connected {
-            if e.code() != windows::Win32::Foundation::ERROR_PIPE_CONNECTED.to_hresult() {
-                tracing::warn!("folder pipe stopped: {e}");
-                return;
+            use windows::Win32::Foundation::{ERROR_NO_DATA, ERROR_PIPE_CONNECTED};
+            if e.code() != ERROR_PIPE_CONNECTED.to_hresult()
+                && e.code() != ERROR_NO_DATA.to_hresult()
+            {
+                tracing::warn!("folder pipe: {e}");
+                // SAFETY: as above.
+                let _ = unsafe { DisconnectNamedPipe(handle) };
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                continue;
             }
         }
         let mut text = String::new();
@@ -100,10 +117,15 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         serve_at(&name, move |p| tx.send(p).unwrap()).unwrap();
         assert!(serve_at(&name, |_| {}).is_err(), "only one server");
-        for dir in [r"C:\Zażółć", r"D:\b"] {
+        // Back-to-back sends hit the races: a client that closes before the
+        // server waits, and a pipe busy between two clients.
+        let dirs: Vec<String> = (0..20).map(|i| format!(r"C:\Zażółć\{i}")).collect();
+        for dir in &dirs {
             assert!(send_to(&name, Path::new(dir)));
+        }
+        for dir in &dirs {
             let got = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
-            assert_eq!(got, PathBuf::from(dir));
+            assert_eq!(&got, Path::new(dir));
         }
         assert!(!send_to(
             r"\\.\pipe\FilesProject-nobody-here",
