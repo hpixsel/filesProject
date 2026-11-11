@@ -24,7 +24,7 @@ SHA-256 plus a minisign signature; the signing key is a GitHub Actions secret.
     Only GitHub's own actions are used, and `rsign2` is pinned
     (`--locked --version`).
 
-## Install and update (next)
+## Install and update (done in v0.2.0)
 
 *   **Install:** `files --install` copies both programs to
     `%LOCALAPPDATA%\Programs\FilesProject` and adds that folder to the
@@ -36,9 +36,9 @@ SHA-256 plus a minisign signature; the signing key is a GitHub Actions secret.
     1.  download the assets to a temporary folder;
     2.  verify `SHA256SUMS.txt.minisig` against the public key compiled into
         the program (`minisign-verify`), then each file's SHA-256;
-    3.  rename the running `files.exe` to `files.old.exe` (a running `.exe`
+    3.  rename the running `files.exe` to `files.exe.old` (a running `.exe`
         can be renamed, not overwritten), move the new files in, restart;
-    4.  the previous version stays as `files.old.exe` for rollback.
+    4.  the previous version stays as `files.exe.old` for rollback.
 *   **Not planned:** delta updates, auto-update without a click, code
     signing (Q7; SmartScreen warns about unsigned downloads, not about our
     own update).

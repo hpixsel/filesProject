@@ -12,9 +12,35 @@ use gpui_kit::component::*;
 use gpui_kit::*;
 use std::path::PathBuf;
 
+/// `files --install`: copy to the install folder and put it on PATH.
+fn install() {
+    files_win::shell::attach_console();
+    let done = files_app::update::install().and_then(|dir| {
+        files_win::shell::add_to_user_path(&dir).map_err(|e| e.to_string())?;
+        Ok(dir)
+    });
+    match done {
+        Ok(dir) => println!(
+            "\nInstalled to {}. Open a new terminal and run `files`.",
+            dir.display()
+        ),
+        Err(e) => eprintln!("\nInstall failed: {e}"),
+    }
+}
+
 fn main() {
-    let start = std::env::args_os()
-        .nth(1)
+    let mut args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--install") {
+        return install();
+    }
+    // Started by the update of a window that is closing right now.
+    let after_update = args.first().is_some_and(|a| a == "--after-update");
+    if after_update {
+        args.remove(0);
+    }
+    let start = args
+        .into_iter()
+        .next()
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(r"C:\"));
@@ -22,17 +48,30 @@ fn main() {
     let start = std::path::absolute(&start).unwrap_or(start);
 
     // Already running: the folder opens as a tab there.
-    if files_win::instance::send(&start) {
+    if !after_update && files_win::instance::send(&start) {
         return;
     }
     // Folders from later `files <folder>` calls; checked on the pipe thread,
     // since a network path can take seconds to answer.
     let (folders, incoming) = std::sync::mpsc::channel();
-    if let Err(e) = files_win::instance::serve(move |dir| {
+    let on_dir = move |dir: PathBuf| {
         if dir.is_dir() {
             let _ = folders.send(dir);
         }
-    }) {
+    };
+    if after_update {
+        // The old window still holds the pipe for a moment.
+        std::thread::spawn(move || {
+            let on_dir = std::sync::Arc::new(on_dir);
+            for _ in 0..100 {
+                let f = on_dir.clone();
+                if files_win::instance::serve(move |d| f(d)).is_ok() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        });
+    } else if let Err(e) = files_win::instance::serve(on_dir) {
         eprintln!("another window serves `files <folder>`: {e}");
     }
 

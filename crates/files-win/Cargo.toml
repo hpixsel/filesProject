@@ -37,6 +37,7 @@ features = [
     "Win32_NetworkManagement_WNet", # network drives
     "Win32_System_Pipes", # one window: `files <folder>` reaches the running one
     "Win32_System_IO",
+    "Win32_System_Console", # --install prints to the terminal
 ]
 
 [features]

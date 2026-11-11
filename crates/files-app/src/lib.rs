@@ -252,6 +252,8 @@ pub mod favourites {
 
 /// What the window remembers between runs, in
 /// `%APPDATA%\FilesProject\settings.txt` as `key=value` lines.
+pub mod update;
+
 pub mod settings {
     use std::path::{Path, PathBuf};
 

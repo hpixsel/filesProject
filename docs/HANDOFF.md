@@ -104,9 +104,20 @@ session reads.
         opens as a new tab.
     *   **Focus lesson:** the Explorer shortcuts work only while focus is in
         a pane, so title-bar changes refocus the active pane.
-6.  **Next in M6:** updates from GitHub releases (decided: SHA-256 plus a
-    minisign signature, old version kept for rollback; also put `files` on
-    PATH), then replacing Explorer with `--restore-explorer`. Later, a
+6.  **M6 updates (design: `docs/designs/updates.md`):**
+    *   **Releases:** pushing a `v*` tag runs `release.yml`: tests, release
+        build, a minisign signature per file (secret `MINISIGN_KEY` in the
+        `release` environment, `v*` tags only), checked against
+        `minisign.pub` before publishing. v0.1.0 published 2026-11-11.
+    *   **Install:** `files --install` copies both programs to
+        `%LOCALAPPDATA%\Programs\FilesProject` and adds it to the user PATH.
+    *   **Update:** the installed copy checks the latest tag at start
+        (`curl.exe`), shows "Update to vX", downloads, verifies each file's
+        signature (`minisign-verify`), renames the running files to `.old`,
+        moves the new ones in, and restarts with `--after-update`.
+    *   **To release:** bump `version` in `crates/files-ui-gpui/Cargo.toml`
+        (and `rdppaste`), merge, tag `vX.Y.Z`, push the tag.
+7.  **Next in M6:** replacing Explorer with `--restore-explorer`. Later, a
     settings page with adjustable density steps.
 
 ## Open questions

@@ -46,6 +46,6 @@ Each milestone gets its own design document in `docs/designs/`.
 ## M6: optional extras (each can be turned off)
 
 - [x] CLI integration: open terminal here (Ctrl+Alt+T), `files <folder>` opens a tab in the running window
-- [ ] `files` on PATH (with the updater, once the app has a fixed install folder)
-- [ ] updates from GitHub releases
+- [x] `files` on PATH (`files --install`)
+- [x] updates from GitHub releases (signed releases on `v*` tags; `files --install`; update button)
 - [ ] replacing Windows Explorer, with `--restore-explorer`

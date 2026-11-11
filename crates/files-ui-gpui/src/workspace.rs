@@ -6,6 +6,7 @@ use crate::i18n::{self, tr};
 use crate::theme;
 use files_app::favourites;
 use files_app::settings::{self, Settings};
+use files_app::update;
 use gpui_kit::component::button::*;
 use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::tab::{Tab, TabBar};
@@ -54,6 +55,18 @@ impl Pane {
 
 type DropSink = Box<dyn Fn(files_win::Result<()>)>;
 
+/// The update offered in the title bar; written by background threads.
+#[derive(Clone, Default, PartialEq)]
+enum Update {
+    #[default]
+    None,
+    Available(String),
+    Working,
+    Failed(String),
+    /// Installed; the new version is starting, so this window closes.
+    Restart,
+}
+
 pub struct Workspace {
     panes: Vec<Pane>,
     active_pane: usize,
@@ -67,6 +80,7 @@ pub struct Workspace {
     /// …and where that drop's outcome goes (the active tab).
     drop_sink: Arc<Mutex<Option<DropSink>>>,
     focus: FocusHandle,
+    update: Arc<Mutex<Update>>,
 }
 
 impl Workspace {
@@ -101,6 +115,12 @@ impl Workspace {
                     this.open_tab(dir, window, cx);
                     window.activate_window();
                 }
+                let update = this.update.lock().unwrap().clone();
+                match update {
+                    Update::Restart => cx.quit(),
+                    Update::None => {}
+                    _ => cx.notify(), // the title-bar button follows the state
+                }
             });
             if alive.is_err() {
                 break;
@@ -122,7 +142,19 @@ impl Workspace {
             drop_dir: Default::default(),
             drop_sink: Default::default(),
             focus: cx.focus_handle(),
+            update: Default::default(),
         };
+        // Only the installed copy updates itself; one quiet check per start.
+        if update::is_installed() {
+            let state = this.update.clone();
+            std::thread::spawn(move || match update::latest_tag() {
+                Ok(tag) if update::is_newer(&tag, env!("CARGO_PKG_VERSION")) => {
+                    *state.lock().unwrap() = Update::Available(tag)
+                }
+                Ok(_) => {}
+                Err(e) => eprintln!("update check: {e}"),
+            });
+        }
         if let Some(h) = explorer::hwnd(window) {
             files_win::shell::set_acrylic(h);
             let sink = this.drop_sink.clone();
@@ -232,6 +264,58 @@ impl Workspace {
         favourites::toggle(&mut self.favourites, &dir);
         self.save_favourites();
         cx.notify();
+    }
+
+    /// "Update to vX" while a newer release exists, then its progress.
+    fn update_button(&self, cx: &mut Context<Self>) -> Option<Button> {
+        let state = self.update.lock().unwrap().clone();
+        let button = Button::new("update").cursor_pointer().xsmall();
+        Some(match state {
+            Update::None | Update::Restart => return None,
+            Update::Available(tag) => button
+                .primary()
+                .label(tr!("Update to {tag}", "Aktualizuj do {tag}"))
+                .on_click(cx.listener(move |this, _, _, cx| this.start_update(tag.clone(), cx))),
+            Update::Working => button
+                .ghost()
+                .loading(true)
+                .label(tr!("Updating…", "Aktualizowanie…")),
+            Update::Failed(e) => button
+                .ghost()
+                .label(tr!("Update failed", "Aktualizacja nie powiodła się"))
+                .tooltip(e)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    *this.update.lock().unwrap() = Update::None;
+                    cx.notify();
+                })),
+        })
+    }
+
+    /// Downloads and checks the release, swaps the files, and starts the new
+    /// version in this folder; the poll loop then closes this window.
+    fn start_update(&mut self, tag: String, cx: &mut Context<Self>) {
+        let state = self.update.clone();
+        let dir = self.active().read(cx).current_dir().to_path_buf();
+        *state.lock().unwrap() = Update::Working;
+        cx.notify();
+        std::thread::spawn(move || {
+            let run = || -> Result<(), String> {
+                let home = update::install_dir().ok_or("LOCALAPPDATA is not set")?;
+                let staging = home.join("update");
+                update::download(&tag, &staging)?;
+                update::apply(&staging, &home)?;
+                std::process::Command::new(home.join("files.exe"))
+                    .arg("--after-update")
+                    .arg(&dir)
+                    .spawn()
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            };
+            *state.lock().unwrap() = match run() {
+                Ok(()) => Update::Restart,
+                Err(e) => Update::Failed(e),
+            };
+        });
     }
 
     /// Applies and saves `self.settings` after a title-bar change.
@@ -506,6 +590,7 @@ impl Render for Workspace {
                         // The title bar starts a window move on mouse down + move, and that
                         // swallows the mouse up, so button clicks never finished.
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .children(self.update_button(cx))
                         .child(
                             Button::new("fav")
                                 .cursor_pointer()

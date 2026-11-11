@@ -303,3 +303,88 @@ pub fn disconnect_drive_dialog(window: isize) -> bool {
     // SAFETY: a valid owner window.
     unsafe { WNetDisconnectDialog(hwnd(window), RESOURCETYPE_DISK.0) }.is_ok()
 }
+
+/// Lets a GUI program print to the terminal that started it (`--install`).
+pub fn attach_console() {
+    use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    // SAFETY: no pointers; fails harmlessly without a parent console.
+    let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+}
+
+/// Adds `dir` to the user's PATH (HKCU\Environment) unless it is there, and
+/// tells running programs. New terminals see it; open ones do not.
+pub fn add_to_user_path(dir: &Path) -> crate::Result<()> {
+    use windows::Win32::System::Registry::{
+        RegCloseKey, RegGetValueW, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+        KEY_READ, KEY_WRITE, REG_EXPAND_SZ, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE,
+    };
+    let (sub, name) = (windows::core::w!("Environment"), windows::core::w!("Path"));
+    let mut key = HKEY::default();
+    // SAFETY: valid strings and an out-pointer; the key is closed below.
+    unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, sub, 0, KEY_READ | KEY_WRITE, &mut key) }.ok()?;
+    let result = (|| {
+        let mut bytes = 0u32;
+        let flags = RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND;
+        // SAFETY: size query first, then a buffer of that size.
+        let mut buf: Vec<u16> = unsafe {
+            match RegGetValueW(key, None, name, flags, None, None, Some(&mut bytes)).ok() {
+                Ok(()) => {
+                    let mut buf = vec![0u16; bytes as usize / 2 + 1];
+                    RegGetValueW(
+                        key,
+                        None,
+                        name,
+                        flags,
+                        None,
+                        Some(buf.as_mut_ptr() as *mut _),
+                        Some(&mut bytes),
+                    )
+                    .ok()?;
+                    buf.truncate(bytes as usize / 2);
+                    buf
+                }
+                Err(_) => Vec::new(), // no user PATH yet
+            }
+        };
+        while buf.last() == Some(&0) {
+            buf.pop();
+        }
+        let path = String::from_utf16_lossy(&buf);
+        let want = dir.to_string_lossy();
+        let has = path.split(';').any(|p| {
+            p.trim_end_matches('\\')
+                .eq_ignore_ascii_case(want.trim_end_matches('\\'))
+        });
+        if has {
+            return Ok(());
+        }
+        let mut new = path.trim_end_matches(';').to_string();
+        if !new.is_empty() {
+            new.push(';');
+        }
+        new.push_str(&want);
+        let wide: Vec<u16> = new.encode_utf16().chain([0]).collect();
+        // SAFETY: the bytes of a NUL-terminated UTF-16 string.
+        unsafe {
+            let data = std::slice::from_raw_parts(wide.as_ptr() as *const u8, wide.len() * 2);
+            RegSetValueExW(key, name, 0, REG_EXPAND_SZ, Some(data)).ok()?;
+            let env = windows::core::w!("Environment");
+            SendMessageTimeoutW(
+                HWND_BROADCAST,
+                WM_SETTINGCHANGE,
+                WPARAM(0),
+                LPARAM(env.as_ptr() as isize),
+                SMTO_ABORTIFHUNG,
+                2000,
+                None,
+            );
+        }
+        Ok(())
+    })();
+    // SAFETY: opened above.
+    let _ = unsafe { RegCloseKey(key) };
+    result
+}
