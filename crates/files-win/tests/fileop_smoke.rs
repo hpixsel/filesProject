@@ -16,7 +16,7 @@ fn tmp(name: &str) -> PathBuf {
 
 fn paste_into(dst: PathBuf) {
     let (tx, rx) = mpsc::channel();
-    fileop::paste_paths(0, dst, move |r| {
+    fileop::paste_paths(0, dst, Default::default(), move |r| {
         tx.send(r.map_err(|e| e.to_string())).unwrap()
     });
     rx.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();

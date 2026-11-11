@@ -56,6 +56,8 @@ pub enum SortBy {
     Name,
     Size,
     Modified,
+    /// By extension (what the Type column shows).
+    Type,
 }
 
 /// Orders `items` folders first (like Explorer), then by `by`; ties and
@@ -69,14 +71,21 @@ pub fn sort_items(
 ) {
     items.sort_by_cached_key(|i| {
         let key = match by {
-            SortBy::Name => 0,
+            SortBy::Name | SortBy::Type => 0,
             SortBy::Size => size_of(i).unwrap_or(0),
             SortBy::Modified => i
                 .modified
                 .and_then(|m| m.duration_since(SystemTime::UNIX_EPOCH).ok())
                 .map_or(0, |d| d.as_secs()),
         };
-        (!i.is_dir, key, i.name.to_lowercase())
+        let ext = match by {
+            SortBy::Type => i
+                .path
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase()),
+            _ => None,
+        };
+        (!i.is_dir, key, ext, i.name.to_lowercase())
     });
     if descending {
         // Reverse within folders and within files, keeping folders first.
@@ -150,6 +159,25 @@ impl History {
     pub fn can_forward(&self) -> bool {
         !self.forward.is_empty()
     }
+
+    /// Where Back leads, nearest first.
+    pub fn back_list(&self) -> impl Iterator<Item = &Path> {
+        self.back.iter().rev().map(PathBuf::as_path)
+    }
+
+    /// Where Forward leads, nearest first.
+    pub fn forward_list(&self) -> impl Iterator<Item = &Path> {
+        self.forward.iter().rev().map(PathBuf::as_path)
+    }
+
+    /// Back (`n` > 0) or forward (`n` < 0) that many steps at once.
+    pub fn step(&mut self, n: isize) {
+        for _ in 0..n.unsigned_abs() {
+            if !(if n > 0 { self.back() } else { self.forward() }) {
+                break;
+            }
+        }
+    }
 }
 
 /// Human-readable size: B, KB, MB, GB (1024-based).
@@ -220,6 +248,20 @@ mod tests {
         assert!(h.back());
         assert_eq!(h.current(), Path::new(r"C:\a\b\c"));
 
+        let mut j = History::new(PathBuf::from("a"));
+        for d in ["b", "c", "d"] {
+            j.go(PathBuf::from(d));
+        }
+        assert_eq!(
+            j.back_list().collect::<Vec<_>>(),
+            [Path::new("c"), Path::new("b"), Path::new("a")]
+        );
+        j.step(2);
+        assert_eq!(j.current(), Path::new("b"));
+        assert_eq!(j.forward_list().next(), Some(Path::new("c")));
+        j.step(-2);
+        assert_eq!(j.current(), Path::new("d"));
+
         let mut h = History::new(PathBuf::from(r"C:\"));
         assert!(h.up(), "a drive root goes up to This PC");
         assert_eq!(h.current(), Path::new(places::THIS_PC));
@@ -261,88 +303,8 @@ mod tests {
     }
 }
 
-/// Favourite folders, one path per line in a plain text file, so the list
-/// can also be edited by hand.
-pub mod favourites {
-    use std::path::{Path, PathBuf};
-
-    /// `%APPDATA%\FilesProject\favourites.txt`.
-    pub fn file() -> Option<PathBuf> {
-        std::env::var_os("APPDATA")
-            .map(|d| PathBuf::from(d).join("FilesProject").join("favourites.txt"))
-    }
-
-    /// Desktop, Documents and Downloads, used until the file exists.
-    pub fn defaults() -> Vec<PathBuf> {
-        let Some(home) = std::env::var_os("USERPROFILE").map(PathBuf::from) else {
-            return Vec::new();
-        };
-        ["Desktop", "Documents", "Downloads"]
-            .iter()
-            .map(|d| home.join(d))
-            .filter(|p| p.is_dir())
-            .collect()
-    }
-
-    pub fn load(file: &Path) -> Vec<PathBuf> {
-        match std::fs::read_to_string(file) {
-            Ok(text) => text
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(PathBuf::from)
-                .collect(),
-            Err(_) => defaults(),
-        }
-    }
-
-    pub fn save(file: &Path, list: &[PathBuf]) -> std::io::Result<()> {
-        if let Some(dir) = file.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let text: String = list
-            .iter()
-            .map(|p| format!("{}\r\n", p.display()))
-            .collect();
-        std::fs::write(file, text)
-    }
-
-    /// Adds `dir`, or removes it when already there. Returns whether it is now a favourite.
-    pub fn toggle(list: &mut Vec<PathBuf>, dir: &Path) -> bool {
-        match list.iter().position(|p| p == dir) {
-            Some(i) => {
-                list.remove(i);
-                false
-            }
-            None => {
-                list.push(dir.to_path_buf());
-                true
-            }
-        }
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn round_trip_and_toggle() {
-            let f = std::env::temp_dir()
-                .join(format!("files-test-fav-{}", std::process::id()))
-                .join("fav.txt");
-            let mut list = vec![PathBuf::from(r"C:\Temp"), PathBuf::from(r"D:\Zażółć gęślą")];
-            save(&f, &list).unwrap();
-            assert_eq!(load(&f), list);
-            assert!(!toggle(&mut list, Path::new(r"C:\Temp")));
-            assert!(toggle(&mut list, Path::new(r"E:\new")));
-            assert_eq!(
-                list,
-                [PathBuf::from(r"D:\Zażółć gęślą"), PathBuf::from(r"E:\new")]
-            );
-            let _ = std::fs::remove_dir_all(f.parent().unwrap());
-        }
-    }
-}
+pub mod bulk;
+pub mod favourites;
 
 /// What the window remembers between runs, in
 /// `%APPDATA%\FilesProject\settings.txt` as `key=value` lines.
@@ -370,6 +332,10 @@ pub mod settings {
         pub restore_tabs: bool,
         /// Show hidden and system files, like Explorer's option.
         pub show_hidden: bool,
+        /// The list's columns after the name, in order: "size", "modified", "type".
+        pub columns: Vec<String>,
+        /// Column widths in px by column name, as last dragged.
+        pub widths: Vec<(String, f32)>,
     }
 
     impl Default for Settings {
@@ -382,6 +348,8 @@ pub mod settings {
                 polish: None,
                 restore_tabs: true,
                 show_hidden: false,
+                columns: vec!["size".into(), "modified".into(), "type".into()],
+                widths: Vec::new(),
             }
         }
     }
@@ -408,6 +376,26 @@ pub mod settings {
                 "lang" => s.polish = Some(value == "pl"),
                 "restore_tabs" => s.restore_tabs = value != "false",
                 "show_hidden" => s.show_hidden = value == "true",
+                "columns" => {
+                    s.columns = value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|c| ["size", "modified", "type"].contains(c))
+                        .map(String::from)
+                        .collect()
+                }
+                "widths" => {
+                    s.widths = value
+                        .split(',')
+                        .filter_map(|w| w.split_once(':'))
+                        .filter_map(|(n, w)| {
+                            Some((
+                                n.trim().to_string(),
+                                w.trim().parse::<f32>().ok()?.clamp(40., 2000.),
+                            ))
+                        })
+                        .collect()
+                }
                 "fonts" => {
                     let n: Vec<f32> = value.split(' ').filter_map(|v| v.parse().ok()).collect();
                     if let [a, b, c] = n[..] {
@@ -430,6 +418,9 @@ pub mod settings {
             s.dark, s.density, s.restore_tabs
         );
         text += &format!("show_hidden={}\r\n", s.show_hidden);
+        text += &format!("columns={}\r\n", s.columns.join(","));
+        let widths: Vec<String> = s.widths.iter().map(|(n, w)| format!("{n}:{w}")).collect();
+        text += &format!("widths={}\r\n", widths.join(","));
         let [a, b, c] = s.fonts;
         text += &format!("fonts={a} {b} {c}\r\n");
         if let Some(pl) = s.polish {
@@ -465,6 +456,8 @@ pub mod settings {
                 polish: Some(true),
                 restore_tabs: false,
                 show_hidden: true,
+                columns: vec!["type".into(), "size".into()],
+                widths: vec![("name".into(), 300.), ("type".into(), 120.5)],
             };
             assert_eq!(parse(&to_text(&s)), s);
             let w = Settings {

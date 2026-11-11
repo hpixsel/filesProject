@@ -69,7 +69,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         let r = data
             .cast::<IUnknown>()
             .map_err(crate::Error::Win)
-            .and_then(|items| crate::fileop::transfer_now(self.window, &items, &dir, mv));
+            .and_then(|items| crate::fileop::transfer_now(self.window, &items, &dir, mv, None));
         (self.on_drop)(r);
         Ok(())
     }

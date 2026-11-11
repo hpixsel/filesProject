@@ -4,8 +4,10 @@
 
 use crate::{Result, Sta};
 use std::path::{Path, PathBuf};
-use windows::core::{Interface, HSTRING};
-use windows::Win32::Foundation::{HWND, S_OK};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
+use windows::core::{implement, Interface, HRESULT, HSTRING, PCWSTR};
+use windows::Win32::Foundation::{E_ABORT, HWND, S_OK};
 use windows::Win32::System::Com::{
     CoCreateInstance, IDataObject, CLSCTX_ALL, FORMATETC, STGMEDIUM,
 };
@@ -13,12 +15,148 @@ use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::{OleFlushClipboard, OleGetClipboard, OleSetClipboard, CF_HDROP};
 use windows::Win32::UI::Shell::{
-    BHID_DataObject, FileOperation, IFileOperation, IShellItem, IShellItemArray,
-    SHCreateItemFromParsingName, SHCreateShellItemArrayFromIDLists, CFSTR_PREFERREDDROPEFFECT,
-    FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FOF_NOCONFIRMMKDIR,
+    BHID_DataObject, FileOperation, IFileOperation, IFileOperationProgressSink,
+    IFileOperationProgressSink_Impl, IShellItem, IShellItemArray, SHCreateItemFromParsingName,
+    SHCreateShellItemArrayFromIDLists, CFSTR_PREFERREDDROPEFFECT, FILEOPERATION_FLAGS,
+    FOF_ALLOWUNDO, FOF_NOCONFIRMMKDIR,
 };
 
 const DROPEFFECT_MOVE: u32 = 2;
+
+/// A file operation's progress, shared with the window: Windows' work units
+/// done out of the total, a request to cancel (honoured before the next
+/// item), and whether it has ended.
+#[derive(Default)]
+pub struct OpProgress {
+    pub total: AtomicU32,
+    pub done: AtomicU32,
+    pub cancel: AtomicBool,
+    pub finished: AtomicBool,
+}
+
+/// Hears Windows' file engine as it works.
+#[implement(IFileOperationProgressSink)]
+struct Sink(Arc<OpProgress>);
+
+impl Sink_Impl {
+    /// Before each item: stop here when the window asked to cancel.
+    fn go_on(&self) -> windows::core::Result<()> {
+        if self.0.cancel.load(Ordering::SeqCst) {
+            Err(E_ABORT.into())
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[allow(non_snake_case)]
+impl IFileOperationProgressSink_Impl for Sink_Impl {
+    fn StartOperations(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn FinishOperations(&self, _: HRESULT) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PreRenameItem(
+        &self,
+        _: u32,
+        _: Option<&IShellItem>,
+        _: &PCWSTR,
+    ) -> windows::core::Result<()> {
+        self.go_on()
+    }
+    fn PostRenameItem(
+        &self,
+        _: u32,
+        _: Option<&IShellItem>,
+        _: &PCWSTR,
+        _: HRESULT,
+        _: Option<&IShellItem>,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PreMoveItem(
+        &self,
+        _: u32,
+        _: Option<&IShellItem>,
+        _: Option<&IShellItem>,
+        _: &PCWSTR,
+    ) -> windows::core::Result<()> {
+        self.go_on()
+    }
+    fn PostMoveItem(
+        &self,
+        _: u32,
+        _: Option<&IShellItem>,
+        _: Option<&IShellItem>,
+        _: &PCWSTR,
+        _: HRESULT,
+        _: Option<&IShellItem>,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PreCopyItem(
+        &self,
+        _: u32,
+        _: Option<&IShellItem>,
+        _: Option<&IShellItem>,
+        _: &PCWSTR,
+    ) -> windows::core::Result<()> {
+        self.go_on()
+    }
+    fn PostCopyItem(
+        &self,
+        _: u32,
+        _: Option<&IShellItem>,
+        _: Option<&IShellItem>,
+        _: &PCWSTR,
+        _: HRESULT,
+        _: Option<&IShellItem>,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PreDeleteItem(&self, _: u32, _: Option<&IShellItem>) -> windows::core::Result<()> {
+        self.go_on()
+    }
+    fn PostDeleteItem(
+        &self,
+        _: u32,
+        _: Option<&IShellItem>,
+        _: HRESULT,
+        _: Option<&IShellItem>,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PreNewItem(&self, _: u32, _: Option<&IShellItem>, _: &PCWSTR) -> windows::core::Result<()> {
+        self.go_on()
+    }
+    fn PostNewItem(
+        &self,
+        _: u32,
+        _: Option<&IShellItem>,
+        _: &PCWSTR,
+        _: &PCWSTR,
+        _: u32,
+        _: HRESULT,
+        _: Option<&IShellItem>,
+    ) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn UpdateProgress(&self, total: u32, done: u32) -> windows::core::Result<()> {
+        self.0.total.store(total, Ordering::Relaxed);
+        self.0.done.store(done, Ordering::Relaxed);
+        Ok(())
+    }
+    fn ResetTimer(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn PauseTimer(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn ResumeTimer(&self) -> windows::core::Result<()> {
+        Ok(())
+    }
+}
 
 fn item(path: &Path) -> Result<IShellItem> {
     // SAFETY: valid string for the call.
@@ -34,7 +172,7 @@ pub fn clipboard_has_paths() -> bool {
 }
 
 /// The items as one shell item array (they share a folder).
-fn item_array(paths: &[PathBuf]) -> Result<IShellItemArray> {
+pub(crate) fn item_array(paths: &[PathBuf]) -> Result<IShellItemArray> {
     let pidls = crate::shell::Pidls::parse(paths)?;
     // SAFETY: the PIDLs stay alive until `pidls` drops, after the call.
     Ok(unsafe { SHCreateShellItemArrayFromIDLists(&pidls.as_slice())? })
@@ -94,12 +232,20 @@ fn wants_move(data: &IDataObject) -> bool {
     }
 }
 
-fn operation(window: isize, flags: FILEOPERATION_FLAGS) -> Result<IFileOperation> {
+fn operation(
+    window: isize,
+    flags: FILEOPERATION_FLAGS,
+    progress: Option<&Arc<OpProgress>>,
+) -> Result<IFileOperation> {
     // SAFETY: standard COM creation on an OLE thread.
     unsafe {
         let op: IFileOperation = CoCreateInstance(&FileOperation, None, CLSCTX_ALL)?;
         op.SetOwnerWindow(HWND(window as *mut _))?;
         op.SetOperationFlags(flags)?;
+        if let Some(p) = progress {
+            let sink: IFileOperationProgressSink = Sink(p.clone()).into();
+            op.Advise(&sink)?;
+        }
         Ok(op)
     }
 }
@@ -111,9 +257,10 @@ pub fn transfer_now(
     items: &windows::core::IUnknown,
     dest: &Path,
     mv: bool,
+    progress: Option<&Arc<OpProgress>>,
 ) -> Result<()> {
     let dest = item(dest)?;
-    let op = operation(window, FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR)?;
+    let op = operation(window, FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR, progress)?;
     // SAFETY: COM calls on this thread's apartment.
     unsafe {
         if mv {
@@ -126,21 +273,31 @@ pub fn transfer_now(
     Ok(())
 }
 
-/// Runs `f` on a new OLE thread and `done` when it finishes.
+/// Runs `f` on a new OLE thread, then marks `progress` finished and calls
+/// `done`.
 fn on_ole_thread(
+    progress: Arc<OpProgress>,
     f: impl FnOnce(&Sta) -> Result<()> + Send + 'static,
     done: impl FnOnce(Result<()>) + Send + 'static,
 ) {
     std::thread::spawn(move || {
         let r = Sta::new().and_then(|sta| f(&sta));
+        progress.finished.store(true, Ordering::SeqCst);
         done(r);
     });
 }
 
 /// Pastes the paths on the clipboard into `target`: moves them if they were
 /// cut, copies otherwise. Windows shows progress and asks about conflicts.
-pub fn paste_paths(window: isize, target: PathBuf, done: impl FnOnce(Result<()>) + Send + 'static) {
+pub fn paste_paths(
+    window: isize,
+    target: PathBuf,
+    progress: Arc<OpProgress>,
+    done: impl FnOnce(Result<()>) + Send + 'static,
+) {
+    let sink = progress.clone();
     on_ole_thread(
+        progress,
         move |_sta| {
             // Windows' engine opens the clipboard itself while reading the
             // items; if another process holds it, nothing was copied yet, so
@@ -148,7 +305,13 @@ pub fn paste_paths(window: isize, target: PathBuf, done: impl FnOnce(Result<()>)
             crate::clipboard::retry_open(|| {
                 // SAFETY: called on this thread's apartment.
                 let data = unsafe { OleGetClipboard()? };
-                match transfer_now(window, &data.cast()?, &target, wants_move(&data)) {
+                match transfer_now(
+                    window,
+                    &data.cast()?,
+                    &target,
+                    wants_move(&data),
+                    Some(&sink),
+                ) {
                     Err(crate::Error::Win(e)) => Err(e),
                     Err(other) => Ok(Err(other)),
                     Ok(()) => Ok(Ok(())),
@@ -164,9 +327,12 @@ pub fn delete(
     window: isize,
     paths: Vec<PathBuf>,
     permanent: bool,
+    progress: Arc<OpProgress>,
     done: impl FnOnce(Result<()>) + Send + 'static,
 ) {
+    let sink = progress.clone();
     on_ole_thread(
+        progress,
         move |_sta| {
             let flags = if permanent {
                 FILEOPERATION_FLAGS(0)
@@ -175,7 +341,7 @@ pub fn delete(
             };
             // SAFETY: COM calls on this thread's apartment.
             unsafe {
-                let op = operation(window, flags)?;
+                let op = operation(window, flags, Some(&sink))?;
                 op.DeleteItems(&item_array(&paths)?)?;
                 op.PerformOperations()?;
             }
@@ -192,10 +358,13 @@ pub fn transfer(
     paths: Vec<PathBuf>,
     dest: PathBuf,
     mv: bool,
+    progress: Arc<OpProgress>,
     done: impl FnOnce(Result<()>) + Send + 'static,
 ) {
+    let sink = progress.clone();
     on_ole_thread(
-        move |_sta| transfer_now(window, &item_array(&paths)?.cast()?, &dest, mv),
+        progress,
+        move |_sta| transfer_now(window, &item_array(&paths)?.cast()?, &dest, mv, Some(&sink)),
         done,
     );
 }

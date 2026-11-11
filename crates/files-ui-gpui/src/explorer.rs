@@ -8,6 +8,7 @@ use files_jobs::sizes::{scan_sizes, SizeScan};
 use files_win::shell::Picked;
 use gpui_kit::component::button::*;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{ContextMenu, ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::table::*;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -45,7 +46,14 @@ actions!(
         NewFolder,
         ClearSelection,
         Properties,
-        ToggleHidden
+        ToggleHidden,
+        ToggleGrid,
+        Search,
+        GridLeft,
+        GridRight,
+        GridUp,
+        GridDown,
+        TogglePane
     ]
 );
 
@@ -63,6 +71,17 @@ pub struct DraggedFiles {
     paths: Vec<PathBuf>,
     /// The source list, reloaded once a move has taken them away.
     changed: Arc<AtomicBool>,
+}
+
+impl DraggedFiles {
+    /// The list they came from; reloads after a move took them away.
+    pub fn source(&self) -> Arc<AtomicBool> {
+        self.changed.clone()
+    }
+
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.paths
+    }
 }
 
 impl Render for DraggedFiles {
@@ -94,6 +113,7 @@ pub fn drop_files(
     dest: &Path,
     window: &Window,
     dest_list: Option<Arc<AtomicBool>>,
+    cx: &mut App,
 ) {
     // Not into itself, its own subfolder, or the folder it is already in.
     let paths: Vec<PathBuf> = d
@@ -116,7 +136,20 @@ pub fn drop_files(
     let m = window.modifiers();
     let mv = !m.control && (m.shift || drive(first) == drive(dest));
     let source = d.changed.clone();
-    files_win::fileop::transfer(h, paths, dest.to_path_buf(), mv, move |r| {
+    let label = match (mv, paths.len()) {
+        (true, n) => tr!(
+            "Moving {n} items to {}",
+            "Przenoszenie ({n}) do {}",
+            place_name(dest)
+        ),
+        (false, n) => tr!(
+            "Copying {n} items to {}",
+            "Kopiowanie ({n}) do {}",
+            place_name(dest)
+        ),
+    };
+    let progress = crate::ops::start(label, cx);
+    files_win::fileop::transfer(h, paths, dest.to_path_buf(), mv, progress, move |r| {
         if let Err(e) = r {
             eprintln!("drop: {e}");
         }
@@ -154,6 +187,14 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", ClearSelection, Some(CONTEXT)),
         KeyBinding::new("alt-enter", Properties, Some(CONTEXT)),
         KeyBinding::new("ctrl-h", ToggleHidden, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-g", ToggleGrid, Some(CONTEXT)),
+        KeyBinding::new("ctrl-f", Search, Some(CONTEXT)),
+        // The thumbnail grid moves in two directions.
+        KeyBinding::new("left", GridLeft, Some("Grid")),
+        KeyBinding::new("right", GridRight, Some("Grid")),
+        KeyBinding::new("up", GridUp, Some("Grid")),
+        KeyBinding::new("down", GridDown, Some("Grid")),
+        KeyBinding::new("alt-p", TogglePane, Some(CONTEXT)),
     ]);
 }
 
@@ -225,6 +266,231 @@ struct Preview {
     path: PathBuf,
     image: Arc<RenderImage>,
     at: Point<Pixels>,
+}
+
+/// A short name for a folder in menus: its own name, a drive, or a place.
+fn place_name(p: &Path) -> String {
+    match Place::of(p) {
+        Place::ThisPc => tr!("This PC", "Ten komputer"),
+        Place::RecycleBin => tr!("Recycle Bin", "Kosz"),
+        Place::Folder => p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| p.display().to_string()),
+    }
+}
+
+/// A column of the file list.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Col {
+    Name,
+    Size,
+    Modified,
+    Type,
+    /// Where a Recycle Bin item or a search result is from.
+    Origin,
+}
+
+impl Col {
+    /// The name its width is saved under.
+    fn key(self) -> &'static str {
+        match self {
+            Col::Name => "name",
+            Col::Size => "size",
+            Col::Modified => "modified",
+            Col::Type => "type",
+            Col::Origin => "origin",
+        }
+    }
+}
+
+/// Windows' type name for an item ("JPG File"), asked once per extension.
+fn type_of(item: &Item) -> String {
+    static NAMES: std::sync::LazyLock<Mutex<HashMap<String, String>>> =
+        std::sync::LazyLock::new(Default::default);
+    let key = if item.is_dir && item.link.is_none() {
+        "<folder>".to_string()
+    } else {
+        item.path
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+    };
+    let mut names = NAMES.lock().unwrap();
+    names
+        .entry(key)
+        .or_insert_with(|| {
+            files_win::shell::type_name(&item.path, item.is_dir && item.link.is_none())
+                .unwrap_or_default()
+        })
+        .clone()
+}
+
+/// The preview pane's content for one item.
+struct PaneContent {
+    path: PathBuf,
+    picture: Option<Arc<RenderImage>>,
+    /// The start of a text file.
+    text: Option<String>,
+}
+
+/// The first 8 KB of a text file, or `None` when it looks binary.
+fn text_start(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut buf = vec![0u8; 8192];
+    let n = std::fs::File::open(path).ok()?.read(&mut buf).ok()?;
+    buf.truncate(n);
+    if buf.contains(&0) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Renaming many items from one pattern: `#` is a number, `{name}` the old
+/// name; extensions stay. Nothing is renamed unless every new name is valid
+/// and free.
+struct BulkRename {
+    paths: Vec<PathBuf>,
+    input: Entity<InputState>,
+    error: Option<String>,
+    explorer: WeakEntity<Explorer>,
+}
+
+impl BulkRename {
+    fn new(
+        paths: Vec<PathBuf>,
+        explorer: WeakEntity<Explorer>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let input = cx.new(|cx| InputState::new(window, cx).default_value("{name} #"));
+        cx.subscribe_in(
+            &input,
+            window,
+            |this, _, ev: &InputEvent, window, cx| match ev {
+                InputEvent::Change => {
+                    this.error = None;
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => this.apply(window, cx),
+                _ => {}
+            },
+        )
+        .detach();
+        BulkRename {
+            paths,
+            input,
+            error: None,
+            explorer,
+        }
+    }
+
+    fn targets(&self, cx: &App) -> Vec<PathBuf> {
+        files_app::bulk::names(&self.paths, self.input.read(cx).value().trim(), 1)
+    }
+
+    fn apply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let to = self.targets(cx);
+        let bad = to.iter().find_map(|p| {
+            bad_name(
+                &p.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            )
+        });
+        if let Some(why) = bad {
+            self.error = Some(why);
+            return cx.notify();
+        }
+        if let Some(taken) = files_app::bulk::clash(&self.paths, &to) {
+            self.error = Some(tr!("Name taken: {}", "Nazwa zajęta: {}", taken.display()));
+            return cx.notify();
+        }
+        window.close_dialog(cx);
+        let from = self.paths.clone();
+        let n = from.len();
+        let done = cx.background_spawn(async move { files_app::bulk::rename_all(&from, &to) });
+        let explorer = self.explorer.clone();
+        cx.spawn(async move |_, cx| {
+            let r = done.await;
+            let _ = explorer.update(cx, |e, cx| {
+                e.notice = match r {
+                    Ok(()) => tr!("Renamed {n} items", "Zmieniono nazwy: {n}").into(),
+                    Err(err) => tr!("Cannot rename: {err}", "Nie można zmienić nazw: {err}").into(),
+                };
+                e.changed.store(true, Ordering::SeqCst);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
+
+impl Render for BulkRename {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme();
+        let (muted, danger) = (t.muted_foreground, t.danger);
+        let name = |p: &Path| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        let to = self.targets(cx);
+        let mut preview = div().v_flex().gap_0p5().text_sm();
+        for (f, t) in self.paths.iter().zip(&to).take(12) {
+            preview = preview.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .child(div().flex_1().truncate().text_color(muted).child(name(f)))
+                    .child("→")
+                    .child(div().flex_1().truncate().child(name(t))),
+            );
+        }
+        if self.paths.len() > 12 {
+            preview = preview.child(div().text_color(muted).child(tr!(
+                "and {} more",
+                "i {} więcej",
+                self.paths.len() - 12
+            )));
+        }
+        div()
+            .v_flex()
+            .gap_2()
+            .child(Input::new(&self.input))
+            .child(div().text_xs().text_color(muted).child(tr!(
+                "# is a number (01, 02…), {{name}} the current name; extensions stay.",
+                "# to numer (01, 02…), {{name}} to obecna nazwa; rozszerzenia zostają."
+            )))
+            .child(preview)
+            .children(
+                self.error
+                    .clone()
+                    .map(|e| div().text_sm().text_color(danger).child(e)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("bulk-cancel")
+                            .cursor_pointer()
+                            .outline()
+                            .label(tr!("Cancel", "Anuluj"))
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("bulk-ok")
+                            .cursor_pointer()
+                            .primary()
+                            .label(tr!("Rename", "Zmień nazwy"))
+                            .on_click(cx.listener(|this, _, window, cx| this.apply(window, cx))),
+                    ),
+            )
+    }
 }
 
 /// A drive tile in This PC.
@@ -373,11 +639,42 @@ pub struct Listing {
     renaming: Option<(PathBuf, Entity<InputState>)>,
     /// Set when a right-click hit a row, so the folder's menu stays shut.
     row_menu: Arc<AtomicBool>,
+    /// Every item of the folder; `items` is what the search filter lets
+    /// through (or the results of a search in subfolders).
+    all: Vec<Item>,
+    /// `items` are search results from subfolders: a Location column shows.
+    found: bool,
     /// The column order chosen in the header (kept across folders).
     sort: (SortBy, bool),
 }
 
 impl Listing {
+    /// The columns shown: the Recycle Bin's own, else the name and the
+    /// chosen ones (settings), plus where search results were found.
+    fn cols(&self, cx: &App) -> Vec<Col> {
+        if self.place == Place::RecycleBin {
+            return vec![Col::Name, Col::Size, Col::Modified, Col::Origin];
+        }
+        let chosen = crate::prefs::get(cx)
+            .columns
+            .iter()
+            .filter_map(|c| match c.as_str() {
+                "size" => Some(Col::Size),
+                "modified" => Some(Col::Modified),
+                "type" => Some(Col::Type),
+                _ => None,
+            });
+        let mut cols: Vec<Col> = std::iter::once(Col::Name).chain(chosen).collect();
+        if self.found {
+            cols.push(Col::Origin);
+        }
+        cols
+    }
+
+    fn col(&self, ix: usize, cx: &App) -> Col {
+        self.cols(cx).get(ix).copied().unwrap_or(Col::Name)
+    }
+
     fn apply_sort(&mut self) {
         let sizes = self.sizes.lock().unwrap();
         let (by, descending) = self.sort;
@@ -396,38 +693,50 @@ impl Listing {
 }
 
 impl TableDelegate for Listing {
-    fn columns_count(&self, _: &App) -> usize {
-        if self.place == Place::RecycleBin {
-            4
-        } else {
-            3
-        }
+    fn columns_count(&self, cx: &App) -> usize {
+        self.cols(cx).len()
     }
     fn rows_count(&self, _: &App) -> usize {
         self.items.len()
     }
-    fn column(&self, col_ix: usize, _: &App) -> Column {
+    fn column(&self, col_ix: usize, cx: &App) -> Column {
         // The header shows the order in use (sorting is ours, see perform_sort).
         let sort = |by: SortBy| match self.sort {
             (b, false) if b == by => ColumnSort::Ascending,
             (b, true) if b == by => ColumnSort::Descending,
             _ => ColumnSort::Default,
         };
-        match col_ix {
-            0 => Column::new("name", tr!("Name", "Nazwa"))
-                .width(px(440.))
+        let col = self.col(col_ix, cx);
+        // A width the user dragged, else the default.
+        let saved = crate::prefs::get(cx)
+            .widths
+            .iter()
+            .find(|(n, _)| n == col.key())
+            .map(|(_, w)| *w);
+        let width = |default: f32| px(saved.unwrap_or(default));
+        match col {
+            Col::Name => Column::new("name", tr!("Name", "Nazwa"))
+                .width(width(440.))
                 .sort(sort(SortBy::Name)),
-            1 => Column::new("size", tr!("Size", "Rozmiar"))
-                .width(px(110.))
+            Col::Size => Column::new("size", tr!("Size", "Rozmiar"))
+                .width(width(110.))
                 .sort(sort(SortBy::Size)),
-            2 if self.place == Place::RecycleBin => {
-                Column::new("modified", tr!("Deleted", "Usunięto")).width(px(160.))
+            Col::Modified if self.place == Place::RecycleBin => {
+                Column::new("modified", tr!("Deleted", "Usunięto")).width(width(160.))
             }
-            2 => Column::new("modified", tr!("Modified", "Zmodyfikowano"))
-                .width(px(160.))
+            Col::Modified => Column::new("modified", tr!("Modified", "Zmodyfikowano"))
+                .width(width(160.))
                 .sort(sort(SortBy::Modified)),
-            _ => Column::new("origin", tr!("Original location", "Oryginalna lokalizacja"))
-                .width(px(320.)),
+            Col::Type => Column::new("type", tr!("Type", "Typ"))
+                .width(width(160.))
+                .sort(sort(SortBy::Type)),
+            Col::Origin if self.found => {
+                Column::new("origin", tr!("Location", "Lokalizacja")).width(width(320.))
+            }
+            Col::Origin => {
+                Column::new("origin", tr!("Original location", "Oryginalna lokalizacja"))
+                    .width(width(320.))
+            }
         }
     }
     /// A header click: that column ascending, descending, then back to the
@@ -439,7 +748,12 @@ impl TableDelegate for Listing {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
-        let by = [SortBy::Name, SortBy::Size, SortBy::Modified][col_ix.min(2)];
+        let by = match self.col(col_ix, cx) {
+            Col::Size => SortBy::Size,
+            Col::Modified => SortBy::Modified,
+            Col::Type => SortBy::Type,
+            Col::Name | Col::Origin => SortBy::Name,
+        };
         self.sort = match sort {
             ColumnSort::Ascending => (by, false),
             ColumnSort::Descending => (by, true),
@@ -487,7 +801,7 @@ impl TableDelegate for Listing {
                 let over = cx.theme().drag_border.opacity(0.25);
                 row.drag_over::<DraggedFiles>(move |s, _, _, _| s.bg(over))
                     .on_drop(move |d: &DraggedFiles, window, cx| {
-                        drop_files(d, &dest, window, Some(list.clone()));
+                        drop_files(d, &dest, window, Some(list.clone()), cx);
                         cx.stop_propagation(); // not into the folder around it too
                     })
             }
@@ -579,8 +893,8 @@ impl TableDelegate for Listing {
             return div();
         };
         let muted = cx.theme().muted_foreground;
-        match col_ix {
-            0 => {
+        match self.col(col_ix, cx) {
+            Col::Name => {
                 let (icon, color) = item_icon(item, cx.theme().primary, muted);
                 let own = self.icons.lock().unwrap().get(&item.path).cloned();
                 let cell = div().h_flex().gap_2().child(match own {
@@ -615,7 +929,7 @@ impl TableDelegate for Listing {
                     _ => cell.child(item.name.clone()),
                 }
             }
-            1 => {
+            Col::Size => {
                 let size = match item.size {
                     _ if item.is_dir && item.link.is_some() => String::new(),
                     Some(n) => format_size(n),
@@ -626,12 +940,13 @@ impl TableDelegate for Listing {
                 };
                 div().text_color(muted).child(size)
             }
-            2 => div().text_color(muted).child(
+            Col::Type => div().text_color(muted).child(type_of(item)),
+            Col::Modified => div().text_color(muted).child(
                 item.modified
                     .map(files_win::shell::local_time)
                     .unwrap_or_default(),
             ),
-            _ => div().text_color(muted).child(
+            Col::Origin => div().text_color(muted).child(
                 item.origin
                     .as_ref()
                     .map(|o| o.display().to_string())
@@ -667,12 +982,34 @@ pub struct Explorer {
     thread_notice: Arc<Mutex<Option<String>>>,
     /// Language the column headers were built in.
     polish: bool,
+    /// The columns the table was built with (settings).
+    columns: Vec<String>,
     /// Whether this listing shows hidden files; reloads when the setting changes.
     shown_hidden: bool,
     /// This PC's drive tiles.
     drives: Vec<Drive>,
     /// A folder just made with Ctrl+Shift+N, renamed once the list shows it.
     pending_rename: Option<PathBuf>,
+    /// The address shows as clickable crumbs; this is true while it is typed in.
+    editing_address: bool,
+    /// The search field (Ctrl+F) while it is open.
+    search: Option<Entity<InputState>>,
+    /// Stops a search in subfolders that is still running.
+    search_stop: Arc<AtomicBool>,
+    /// Watches the folder on disk; `dirty` is set when it changes.
+    watch: Option<files_win::watch::Watch>,
+    dirty: Arc<AtomicBool>,
+    last_reload: std::time::Instant,
+    /// The thumbnail view (large pictures) instead of the list.
+    grid: bool,
+    /// The preview pane (Alt+P) and what it shows.
+    pane_open: bool,
+    pane: Option<PaneContent>,
+    grid_scroll: ScrollHandle,
+    /// The grid's width in px, measured as it paints.
+    grid_width: std::rc::Rc<std::cell::Cell<f32>>,
+    /// Thumbnails for the grid, filled in the background per folder.
+    thumbs: Arc<Mutex<HashMap<PathBuf, Arc<RenderImage>>>>,
     /// The hover preview on screen, and a counter that drops stale ones.
     preview: Option<Preview>,
     hover_gen: usize,
@@ -696,6 +1033,8 @@ impl Explorer {
             renaming: None,
             row_menu: Default::default(),
             sort: Default::default(),
+            all: Vec::new(),
+            found: false,
         };
         // Ctrl/Shift+click is ours (Listing::marked), not the table's single row.
         let table =
@@ -705,6 +1044,21 @@ impl Explorer {
         cx.subscribe_in(&table, window, |this, _, ev: &TableEvent, window, cx| {
             match ev {
                 TableEvent::DoubleClickedRow(ix) => this.open_row(*ix, window, cx),
+                // A dragged column width is kept for every list.
+                TableEvent::ColumnWidthsChanged(widths) => {
+                    let cols = this.table.read(cx).delegate().cols(cx);
+                    let widths: Vec<(String, f32)> = cols
+                        .iter()
+                        .zip(widths)
+                        .map(|(c, w)| (c.key().to_string(), f32::from(*w)))
+                        .collect();
+                    crate::prefs::set(cx, |s| {
+                        for (key, w) in widths {
+                            s.widths.retain(|(k, _)| *k != key);
+                            s.widths.push((key, w));
+                        }
+                    });
+                }
                 // A plain click or arrow key: the selection becomes this row.
                 TableEvent::SelectRow(ix) => this.table.update(cx, |t, cx| {
                     let l = t.delegate_mut();
@@ -720,9 +1074,15 @@ impl Explorer {
             &address,
             window,
             |this, input, ev: &InputEvent, window, cx| {
+                if let InputEvent::Blur = ev {
+                    this.editing_address = false;
+                    cx.notify();
+                }
                 if let InputEvent::PressEnter { .. } = ev {
                     let typed = PathBuf::from(input.read(cx).value().trim());
                     if typed.is_dir() || places::is_place(&typed) {
+                        this.editing_address = false;
+                        this.focus.focus(window, cx);
                         this.history.go(typed);
                         this.load(window, cx);
                     } else {
@@ -765,9 +1125,22 @@ impl Explorer {
             changed,
             thread_notice: Default::default(),
             polish: i18n::polish(),
+            columns: Vec::new(),
             shown_hidden: false,
             drives: Vec::new(),
             pending_rename: None,
+            editing_address: false,
+            search: None,
+            search_stop: Default::default(),
+            watch: None,
+            dirty: Default::default(),
+            last_reload: std::time::Instant::now(),
+            grid: false,
+            pane_open: false,
+            pane: None,
+            grid_scroll: ScrollHandle::new(),
+            grid_width: Default::default(),
+            thumbs: Default::default(),
             preview: None,
             hover_gen: 0,
             typed: (String::new(), std::time::Instant::now()),
@@ -785,6 +1158,21 @@ impl Explorer {
         self.status = tr!("Loading…", "Wczytywanie…").into();
         cx.notify();
         let place = Place::of(&dir);
+        // A new folder ends a running search in subfolders.
+        self.search_stop.store(true, Ordering::SeqCst);
+        let filter = self
+            .search
+            .as_ref()
+            .map(|i| i.read(cx).value().trim().to_lowercase())
+            .unwrap_or_default();
+        self.last_reload = std::time::Instant::now();
+        // Reloads when the folder changes on disk (folders only, not places).
+        self.watch = (place == Place::Folder)
+            .then(|| {
+                let dirty = self.dirty.clone();
+                files_win::watch::watch(&dir, move || dirty.store(true, Ordering::SeqCst)).ok()
+            })
+            .flatten();
         if place == Place::ThisPc {
             // The hidden table must not keep the last folder's selection, or
             // Delete here would act on files nobody can see.
@@ -835,16 +1223,50 @@ impl Explorer {
                         let icons: Arc<Mutex<HashMap<PathBuf, Arc<RenderImage>>>> =
                             Default::default();
                         this.load_icons(wants, icons.clone(), window, cx);
+                        if this.grid {
+                            let files: Vec<PathBuf> = items
+                                .iter()
+                                .filter(|i| !i.is_dir)
+                                .map(|i| i.path.clone())
+                                .collect();
+                            this.load_thumbs(files, window, cx);
+                        }
                         this.table.update(cx, |t, cx| {
-                            t.delegate_mut().items = items;
-                            t.delegate_mut().place = place;
-                            t.delegate_mut().sizes = sizes;
-                            t.delegate_mut().icons = icons;
-                            t.delegate_mut().marked.clear();
-                            t.delegate_mut().renaming = None;
-                            t.delegate_mut().anchor = None;
-                            t.delegate_mut().apply_sort();
+                            // A reload of the same folder keeps the selection.
+                            let l = t.delegate();
+                            let kept: BTreeSet<PathBuf> = l.marked_paths().into_iter().collect();
+                            let current = t
+                                .selected_row()
+                                .and_then(|ix| l.items.get(ix))
+                                .map(|i| i.path.clone());
+                            let l = t.delegate_mut();
+                            l.items = items;
+                            l.place = place;
+                            l.sizes = sizes;
+                            l.icons = icons;
+                            // A rename in progress survives a reload while its file is there.
+                            if let Some((p, _)) = &l.renaming {
+                                if !l.items.iter().any(|i| &i.path == p) {
+                                    l.renaming = None;
+                                }
+                            }
+                            l.anchor = None;
+                            l.all = l.items.clone();
+                            l.found = false;
+                            if !filter.is_empty() {
+                                l.items.retain(|i| i.name.to_lowercase().contains(&filter));
+                            }
+                            l.apply_sort();
+                            l.marked = (0..l.items.len())
+                                .filter(|&i| kept.contains(&l.items[i].path))
+                                .collect();
+                            let row =
+                                current.and_then(|p| l.items.iter().position(|i| i.path == p));
                             t.refresh(cx);
+                            match row {
+                                Some(ix) => t.set_selected_row(ix, cx),
+                                None => t.clear_selection(cx),
+                            }
                         });
                         // Ctrl+Shift+N: the new folder's name is edited right away.
                         if let Some(new) = this.pending_rename.take() {
@@ -912,7 +1334,11 @@ impl Explorer {
         let Some(h) = hwnd(window) else { return };
         let dir = self.history.current().to_path_buf();
         let report = self.report_done(tr!("Paste", "Wklejanie"));
-        files_win::fileop::paste_paths(h, dir, report);
+        let progress = crate::ops::start(
+            tr!("Pasting into {}", "Wklejanie do {}", place_name(&dir)),
+            cx,
+        );
+        files_win::fileop::paste_paths(h, dir, progress, report);
     }
 
     /// The selected items: the marked rows, or the table's current row.
@@ -965,12 +1391,14 @@ impl Explorer {
             return;
         }
         let report = self.report_done(tr!("Delete", "Usuwanie"));
+        let label = tr!("Deleting {} items", "Usuwanie ({})", paths.len());
+        let progress = crate::ops::start(label, cx);
         if Place::of(self.history.current()) == Place::RecycleBin {
             // Out of the bin is for good; the $I file goes with its content.
             let paths = paths.iter().flat_map(|p| places::bin_files(p)).collect();
-            return files_win::fileop::delete(h, paths, true, report);
+            return files_win::fileop::delete(h, paths, true, progress, report);
         }
-        files_win::fileop::delete(h, paths, permanent, report);
+        files_win::fileop::delete(h, paths, permanent, progress, report);
     }
 
     fn delete_sel(&mut self, _: &DeleteSel, window: &mut Window, cx: &mut Context<Self>) {
@@ -983,8 +1411,12 @@ impl Explorer {
     /// F2: the name in its row becomes editable; Enter or clicking away
     /// renames, Esc cancels.
     fn rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
-        let [path] = &self.selected(cx)[..] else {
-            return; // one item at a time
+        let selected = self.selected(cx);
+        if selected.len() > 1 && Place::of(self.history.current()) == Place::Folder {
+            return self.bulk_rename(selected, window, cx);
+        }
+        let [path] = &selected[..] else {
+            return;
         };
         if Place::of(self.history.current()) != Place::Folder {
             return;
@@ -1032,6 +1464,8 @@ impl Explorer {
     }
 
     fn focus_address(&mut self, _: &FocusAddress, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing_address = true;
+        cx.notify();
         self.address.update(cx, |a, cx| {
             a.focus(window, cx);
             a.select_all(window, cx);
@@ -1140,6 +1574,246 @@ impl Explorer {
 
     /// Windows' icons for `paths`, a few at a time off the UI thread, each
     /// batch shown as it arrives. A newer folder has its own `icons`.
+    /// The list or the thumbnail grid (for photos).
+    /// Tiles per row: a tile is 144 px wide with an 8 px gap, in 8 px of padding.
+    fn grid_columns(&self) -> usize {
+        ((self.grid_width.get() - 16. + 8.) / 152.).floor().max(1.) as usize
+    }
+
+    /// Arrow keys in the grid: the selection moves `by` tiles and stays in view.
+    fn grid_move(&mut self, by: isize, cx: &mut Context<Self>) {
+        let ix = self.table.update(cx, |t, cx| {
+            let l = t.delegate_mut();
+            let last = l.items.len().checked_sub(1)?;
+            let from = l.anchor.or_else(|| l.marked.first().copied());
+            let to = match from {
+                Some(f) => (f as isize + by).clamp(0, last as isize) as usize,
+                None => 0,
+            };
+            l.marked = [to].into();
+            l.anchor = Some(to);
+            cx.notify();
+            Some(to)
+        });
+        if let Some(ix) = ix {
+            // The canvas that measures the width is child 0; tiles follow it.
+            self.grid_scroll.scroll_to_item(ix + 1);
+        }
+        cx.notify();
+    }
+
+    fn toggle_grid(&mut self, _: &ToggleGrid, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus.focus(window, cx);
+        self.grid = !self.grid;
+        if self.grid {
+            let files: Vec<PathBuf> = self
+                .table
+                .read(cx)
+                .delegate()
+                .items
+                .iter()
+                .filter(|i| !i.is_dir)
+                .map(|i| i.path.clone())
+                .collect();
+            self.load_thumbs(files, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Thumbnails (photos, videos, PDFs) for the grid, a few at a time off
+    /// the UI thread, shown as they arrive. A newer folder starts a new map.
+    fn load_thumbs(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let thumbs: Arc<Mutex<HashMap<PathBuf, Arc<RenderImage>>>> = Default::default();
+        self.thumbs = thumbs.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            for chunk in paths.chunks(8) {
+                let chunk = chunk.to_vec();
+                let found = cx
+                    .background_spawn(async move {
+                        chunk
+                            .into_iter()
+                            .filter_map(|p| {
+                                let pic = shell_picture(&p, 256, true).or_else(|| {
+                                    has_own_icon(&p)
+                                        .then(|| shell_picture(&p, 96, false))
+                                        .flatten()
+                                });
+                                pic.map(|i| (p, i))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .await;
+                thumbs.lock().unwrap().extend(found);
+                // Stop once another folder (or the list view) took over.
+                let alive = this.update(cx, |this, cx| {
+                    cx.notify();
+                    this.grid && Arc::ptr_eq(&this.thumbs, &thumbs)
+                });
+                if !matches!(alive, Ok(true)) {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The folder as large tiles: thumbnails for photos and videos, icons
+    /// for the rest. Click selects (Ctrl+click adds), double-click opens,
+    /// right-click is Explorer's menu, middle-click opens a folder in a tab.
+    fn grid_view(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        // shortcut: every tile is laid out (no virtual scrolling); fine for
+        // photo folders, slow past a few thousand items. Virtualize then.
+        let t = cx.theme();
+        let (muted, hover, selected, accent, radius) = (
+            t.muted_foreground,
+            t.table_hover,
+            t.table_active,
+            t.primary,
+            t.radius,
+        );
+        let table = self.table.read(cx);
+        let l = table.delegate();
+        let marked: BTreeSet<usize> = if l.marked.is_empty() {
+            table.selected_row().into_iter().collect()
+        } else {
+            l.marked.clone()
+        };
+        let thumbs = self.thumbs.lock().unwrap();
+        let icons = l.icons.lock().unwrap();
+        let width = self.grid_width.clone();
+        let mut grid = div()
+            .id("grid")
+            .size_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.grid_scroll)
+            // Its width, for how many tiles an arrow key up or down skips.
+            .child(
+                canvas(
+                    move |bounds, _, _| width.set(f32::from(bounds.size.width)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .p_2()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .content_start()
+            .gap_2();
+        for (ix, item) in l.items.iter().enumerate() {
+            let picture = thumbs
+                .get(&item.path)
+                .or_else(|| icons.get(&item.path))
+                .cloned();
+            let (icon, color) = item_icon(item, accent, muted);
+            let face = match picture {
+                Some(p) => img(ImageSource::Render(p))
+                    .max_w(px(128.))
+                    .max_h(px(128.))
+                    .object_fit(ObjectFit::Contain)
+                    .into_any_element(),
+                None => icon.size_16().text_color(color).into_any_element(),
+            };
+            let (open_dir, menu_paths) = (
+                item.is_dir
+                    .then(|| item.link.clone().unwrap_or_else(|| item.path.clone())),
+                item.path.clone(),
+            );
+            grid = grid.child(
+                div()
+                    .id(("tile", ix))
+                    .w(px(144.))
+                    .p_2()
+                    .v_flex()
+                    .items_center()
+                    .gap_1()
+                    .rounded(radius)
+                    .cursor_pointer()
+                    .when(marked.contains(&ix), |d| d.bg(selected))
+                    .hover(move |s| s.bg(hover))
+                    .child(
+                        div()
+                            .size(px(128.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(face),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .text_center()
+                            .text_sm()
+                            .truncate()
+                            .child(item.name.clone()),
+                    )
+                    .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                        if e.click_count() >= 2 {
+                            return this.open_row(ix, window, cx);
+                        }
+                        let m = e.modifiers();
+                        this.focus.focus(window, cx); // arrow keys move in the grid
+                                                      // The grid's selection is `marked` alone: the hidden
+                                                      // table's own row would replace it a moment later.
+                        this.table.update(cx, |t, cx| {
+                            t.clear_selection(cx);
+                            let l = t.delegate_mut();
+                            if m.shift {
+                                let from = l.anchor.unwrap_or(ix);
+                                l.marked = (from.min(ix)..=from.max(ix)).collect();
+                            } else if m.control {
+                                if !l.marked.remove(&ix) {
+                                    l.marked.insert(ix);
+                                }
+                                l.anchor = Some(ix);
+                            } else {
+                                l.marked = [ix].into();
+                                l.anchor = Some(ix);
+                            }
+                            cx.notify();
+                        });
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, _, window, cx| {
+                            let paths = {
+                                let l = this.table.read(cx).delegate();
+                                if l.marked.contains(&ix) {
+                                    l.marked_paths()
+                                } else {
+                                    vec![menu_paths.clone()]
+                                }
+                            };
+                            this.table.update(cx, |t, _| {
+                                let l = t.delegate_mut();
+                                if !l.marked.contains(&ix) {
+                                    l.marked = [ix].into();
+                                }
+                                l.row_menu.store(true, Ordering::SeqCst);
+                            });
+                            let Some(h) = hwnd(window) else { return };
+                            let changed = this.changed.clone();
+                            outside_dispatch(cx, move || {
+                                if let Ok(Picked::Ran) = files_win::shell::context_menu(h, &paths) {
+                                    changed.store(true, Ordering::SeqCst);
+                                }
+                            });
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |_, _, _, cx| {
+                            if let Some(dir) = open_dir.clone() {
+                                cx.emit(OpenInNewTab(dir));
+                            }
+                        }),
+                    ),
+            );
+        }
+        grid
+    }
+
     fn load_icons(
         &mut self,
         paths: Vec<PathBuf>,
@@ -1221,6 +1895,463 @@ impl Explorer {
             });
         })
         .detach();
+    }
+
+    /// The path as clickable levels, like FilePilot: This PC › C: › Users ›
+    /// ... Click a level to go there, middle-click for a new tab, drop files
+    /// on it; click the empty space on the right to type a path.
+    fn crumbs(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = cx.theme();
+        let (muted, fg, hover, border, radius) = (
+            t.muted_foreground,
+            t.foreground,
+            t.table_hover,
+            t.input,
+            t.radius,
+        );
+        let mut levels: Vec<(String, PathBuf)> = Vec::new();
+        let here = self.history.current();
+        match Place::of(here) {
+            Place::ThisPc => levels.push((tr!("This PC", "Ten komputer"), here.into())),
+            Place::RecycleBin => levels.push((tr!("Recycle Bin", "Kosz"), here.into())),
+            Place::Folder => {
+                levels.push((tr!("This PC", "Ten komputer"), places::THIS_PC.into()));
+                let mut dirs: Vec<&Path> = here.ancestors().collect();
+                dirs.reverse();
+                for d in dirs {
+                    let name = match d.file_name() {
+                        Some(n) => n.to_string_lossy().into_owned(),
+                        // A drive (C:) or a share (\\server\share).
+                        None => d.display().to_string().trim_end_matches('\\').to_string(),
+                    };
+                    levels.push((name, d.to_path_buf()));
+                }
+            }
+        }
+        // A long path hides levels after "This PC", oldest first, until the
+        // rest fits about 90 characters (shortcut: a character budget, not
+        // the bar's width; measure the text if it misjudges).
+        let len =
+            |l: &[(String, PathBuf)]| l.iter().map(|(n, _)| n.chars().count() + 3).sum::<usize>();
+        let mut hidden = 0;
+        while levels.len() - hidden > 3 && len(&levels[hidden + 1..]) + 5 > 90 {
+            hidden += 1;
+        }
+        let last = levels.len() - 1;
+        let mut bar = div()
+            .id("crumbs")
+            .flex_1()
+            .h_8()
+            .px_1()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_0p5()
+            .overflow_hidden()
+            .rounded(radius)
+            .border_1()
+            .border_color(border)
+            .cursor_text()
+            .on_click(
+                cx.listener(|this, _, window, cx| this.focus_address(&FocusAddress, window, cx)),
+            );
+        for (ix, (name, path)) in levels.into_iter().enumerate() {
+            if ix > 0 && ix <= hidden {
+                if ix == 1 {
+                    bar = bar.child(div().px_1().text_color(muted).child("…"));
+                }
+                continue;
+            }
+            if ix > 0 {
+                bar = bar.child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted));
+            }
+            let (go, tab, drop_to) = (path.clone(), path.clone(), path.clone());
+            bar = bar.child(
+                div()
+                    .id(("crumb", ix))
+                    .flex_shrink_0()
+                    .px_2()
+                    .py_0p5()
+                    .rounded(radius)
+                    .cursor_pointer()
+                    .text_color(if ix == last { fg } else { muted })
+                    .hover(move |s| s.bg(hover).text_color(fg))
+                    .tooltip({
+                        let full = path.display().to_string();
+                        move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(full.clone())
+                                .build(window, cx)
+                        }
+                    })
+                    .drag_over::<DraggedFiles>(move |s, _, _, _| s.bg(hover))
+                    .on_drop(move |d: &DraggedFiles, window, cx| {
+                        drop_files(d, &drop_to, window, None, cx)
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation(); // not the "type a path" click around it
+                        this.go_to(go.clone(), window, cx);
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |_, _, _, cx| cx.emit(OpenInNewTab(tab.clone()))),
+                    )
+                    .child(name),
+            );
+        }
+        bar
+    }
+
+    /// Ctrl+F: a search field. Typing filters this folder; Enter also
+    /// searches its subfolders.
+    fn search(&mut self, _: &Search, window: &mut Window, cx: &mut Context<Self>) {
+        let input = match &self.search {
+            Some(i) => i.clone(),
+            None => {
+                let input = cx.new(|cx| {
+                    InputState::new(window, cx).placeholder(tr!(
+                        "Search (Enter: subfolders too)",
+                        "Szukaj (Enter: też w podfolderach)"
+                    ))
+                });
+                cx.subscribe_in(
+                    &input,
+                    window,
+                    |this, input, ev: &InputEvent, window, cx| match ev {
+                        InputEvent::Change => {
+                            let text = input.read(cx).value().to_string();
+                            this.filter(&text, cx);
+                        }
+                        InputEvent::PressEnter { .. } => {
+                            let text = input.read(cx).value().trim().to_string();
+                            this.search_subfolders(text, window, cx);
+                        }
+                        _ => {}
+                    },
+                )
+                .detach();
+                self.search = Some(input.clone());
+                input
+            }
+        };
+        input.update(cx, |i, cx| {
+            i.focus(window, cx);
+            i.select_all(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Shows only the items whose name contains `text` (any case).
+    fn filter(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.search_stop.store(true, Ordering::SeqCst);
+        let text = text.trim().to_lowercase();
+        self.table.update(cx, |t, cx| {
+            let l = t.delegate_mut();
+            l.found = false;
+            l.items = l
+                .all
+                .iter()
+                .filter(|i| i.name.to_lowercase().contains(&text))
+                .cloned()
+                .collect();
+            l.marked.clear();
+            l.anchor = None;
+            l.apply_sort();
+            t.refresh(cx);
+            t.clear_selection(cx);
+        });
+        let n = self.table.read(cx).delegate().items.len();
+        self.status = tr!("{} items", "Elementów: {}", n).into();
+        cx.notify();
+    }
+
+    /// Enter in the search field: names containing `text` in this folder and
+    /// every folder below it, found in the background and shown as they
+    /// come (at most 5,000).
+    fn search_subfolders(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.history.current().to_path_buf();
+        if text.is_empty() || Place::of(&root) != Place::Folder {
+            return;
+        }
+        self.search_stop.store(true, Ordering::SeqCst);
+        let stop = Arc::new(AtomicBool::new(false));
+        self.search_stop = stop.clone();
+        let show_hidden = crate::prefs::get(cx).show_hidden;
+        self.table.update(cx, |t, cx| {
+            let l = t.delegate_mut();
+            l.found = true;
+            l.items.clear();
+            l.marked.clear();
+            t.refresh(cx);
+        });
+        self.status = tr!("Searching…", "Szukanie…").into();
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<Item>>();
+        let needle = text.to_lowercase();
+        let walking = stop.clone();
+        cx.background_spawn(async move {
+            let mut queue = vec![root];
+            let mut count = 0;
+            while let Some(dir) = queue.pop() {
+                if walking.load(Ordering::SeqCst) || count >= 5_000 {
+                    break;
+                }
+                let Ok(items) = list_dir(&dir, show_hidden) else {
+                    continue;
+                };
+                let mut hits = Vec::new();
+                for mut i in items {
+                    if i.is_dir {
+                        queue.push(i.path.clone());
+                    }
+                    if i.name.to_lowercase().contains(&needle) {
+                        i.origin = Some(dir.clone());
+                        hits.push(i);
+                    }
+                }
+                count += hits.len();
+                if !hits.is_empty() && tx.send(hits).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.spawn_in(window, async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(200))
+                .await;
+            let mut batch = Vec::new();
+            let mut done = false;
+            loop {
+                match rx.try_recv() {
+                    Ok(b) => batch.extend(b),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        done = true;
+                        break;
+                    }
+                }
+            }
+            let alive = this.update(cx, |this, cx| {
+                if stop.load(Ordering::SeqCst) {
+                    return false;
+                }
+                this.table.update(cx, |t, cx| {
+                    t.delegate_mut().items.extend(batch);
+                    t.refresh(cx);
+                });
+                let n = this.table.read(cx).delegate().items.len();
+                this.status = if done {
+                    tr!("Found {n}", "Znaleziono: {n}").into()
+                } else {
+                    tr!("Searching… {n} found", "Szukanie… znaleziono: {n}").into()
+                };
+                cx.notify();
+                true
+            });
+            if done || !matches!(alive, Ok(true)) {
+                return;
+            }
+        })
+        .detach();
+    }
+
+    /// Esc in the search field: the whole folder again.
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search = None;
+        self.filter("", cx);
+        self.focus.focus(window, cx);
+    }
+
+    /// Right-click on Back or Forward: the folders that way, nearest first;
+    /// choosing one jumps there.
+    fn history_menu(&self, back: bool, cx: &mut Context<Self>) -> ContextMenu<Stateful<Div>> {
+        let steps: Vec<(String, isize)> = {
+            let list: Vec<&Path> = if back {
+                self.history.back_list().collect()
+            } else {
+                self.history.forward_list().collect()
+            };
+            list.into_iter()
+                .take(20)
+                .enumerate()
+                .map(|(i, p)| {
+                    let n = i as isize + 1;
+                    (place_name(p), if back { n } else { -n })
+                })
+                .collect()
+        };
+        let me = cx.weak_entity();
+        div()
+            .id(if back {
+                "back-history"
+            } else {
+                "forward-history"
+            })
+            .context_menu(move |mut menu, _, _| {
+                for (label, n) in steps.clone() {
+                    let me = me.clone();
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                        let _ = me.update(cx, |this, cx| {
+                            this.history.step(n);
+                            this.load(window, cx);
+                        });
+                    }));
+                }
+                menu
+            })
+    }
+
+    /// The preview pane: the selected item's picture (or the start of a
+    /// text file) and its details. Loads in the background when the
+    /// selection changes.
+    fn side_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let selected = self.selected(cx);
+        let item = match &selected[..] {
+            [one] => self
+                .table
+                .read(cx)
+                .delegate()
+                .items
+                .iter()
+                .find(|i| &i.path == one)
+                .cloned(),
+            _ => None,
+        };
+        if let Some(item) = &item {
+            if self.pane.as_ref().is_none_or(|p| p.path != item.path) {
+                self.pane = Some(PaneContent {
+                    path: item.path.clone(),
+                    picture: None,
+                    text: None,
+                });
+                let (path, is_dir) = (item.path.clone(), item.is_dir);
+                let task = cx.background_spawn(async move {
+                    let picture = (!is_dir)
+                        .then(|| shell_picture(&path, 512, true))
+                        .flatten()
+                        .or_else(|| shell_picture(&path, 256, false));
+                    let text = if is_dir { None } else { text_start(&path) };
+                    (path, picture, text)
+                });
+                cx.spawn_in(window, async move |this, cx| {
+                    let (path, picture, text) = task.await;
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(p) = this.pane.as_mut().filter(|p| p.path == path) {
+                            p.picture = picture;
+                            p.text = text;
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
+        let t = cx.theme();
+        let (muted, border, mono) = (t.muted_foreground, t.border, t.mono_font_family.clone());
+        let pane = div()
+            .id("preview-pane")
+            .w(px(300.))
+            .h_full()
+            .flex_shrink_0()
+            .border_l_1()
+            .border_color(border)
+            .p_3()
+            .v_flex()
+            .gap_2()
+            .overflow_y_scroll();
+        let Some(item) = item else {
+            let hint = match selected.len() {
+                0 => tr!(
+                    "Select a file to preview it.",
+                    "Zaznacz plik, żeby zobaczyć podgląd."
+                ),
+                n => tr!("{n} items selected", "Zaznaczono: {n}"),
+            };
+            return div().child(pane.text_color(muted).child(hint));
+        };
+        let content = self.pane.as_ref().filter(|p| p.path == item.path);
+        let picture = content.and_then(|p| p.picture.clone());
+        let text = content
+            .and_then(|p| p.text.clone())
+            .filter(|_| picture.is_none() || !item.is_dir);
+        let size = item
+            .size
+            .or_else(|| {
+                self.table
+                    .read(cx)
+                    .delegate()
+                    .sizes
+                    .lock()
+                    .unwrap()
+                    .get(&item.path)
+                    .copied()
+            })
+            .map(format_size);
+        let row = |label: String, value: String| {
+            div()
+                .v_flex()
+                .child(div().text_xs().text_color(muted).child(label))
+                .child(div().text_sm().child(value))
+        };
+        div().child(
+            pane.children(picture.map(|p| {
+                div().flex().justify_center().child(
+                    img(ImageSource::Render(p))
+                        .max_w(px(270.))
+                        .max_h(px(270.))
+                        .object_fit(ObjectFit::Contain),
+                )
+            }))
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(item.name.clone()),
+            )
+            .child(row(tr!("Type", "Typ"), type_of(&item)))
+            .children(size.map(|s| row(tr!("Size", "Rozmiar"), s)))
+            .children(item.modified.map(|m| {
+                row(
+                    tr!("Modified", "Zmodyfikowano"),
+                    files_win::shell::local_time(m),
+                )
+            }))
+            .child(row(
+                tr!("Location", "Lokalizacja"),
+                item.path
+                    .parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+            ))
+            .children(text.map(|t| {
+                div()
+                    .mt_2()
+                    .p_2()
+                    .rounded(cx.theme().radius)
+                    .bg(cx.theme().muted)
+                    .font_family(mono)
+                    .text_xs()
+                    .whitespace_normal()
+                    .child(t)
+            })),
+        )
+    }
+
+    /// F2 with several items: one pattern names them all (see `BulkRename`).
+    fn bulk_rename(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let me = cx.weak_entity();
+        let view = cx.new(|cx| BulkRename::new(paths, me, window, cx));
+        let shown = view.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            dialog
+                .title(tr!("Rename items", "Zmień nazwy"))
+                .w(px(560.))
+                .child(shown.clone())
+        });
+        view.update(cx, |v, cx| {
+            v.input.update(cx, |i, cx| {
+                i.focus(window, cx);
+                i.select_all(window, cx);
+            })
+        });
     }
 
     /// Esc while renaming: the old name stays.
@@ -1480,6 +2611,15 @@ impl Explorer {
         if self.changed.swap(false, Ordering::SeqCst) {
             self.load(window, cx);
         }
+        // The folder changed on disk: reload, at most once a second, so a
+        // copy of thousands of files does not reload thousands of times.
+        // Not while search results from subfolders are shown.
+        if self.last_reload.elapsed() > Duration::from_secs(1)
+            && !self.table.read(cx).delegate().found
+            && self.dirty.swap(false, Ordering::SeqCst)
+        {
+            self.load(window, cx);
+        }
         if let Some(text) = self.thread_notice.lock().unwrap().take() {
             self.notice = text.into();
         }
@@ -1544,6 +2684,15 @@ impl Explorer {
             .into();
             cx.notify();
         }
+    }
+
+    /// This tab's folder and where Back leads, nearest first (folders only).
+    pub fn recent(&self) -> Vec<PathBuf> {
+        std::iter::once(self.history.current())
+            .chain(self.history.back_list())
+            .filter(|p| !places::is_place(p))
+            .map(Path::to_path_buf)
+            .collect()
     }
 
     pub fn current_dir(&self) -> &Path {
@@ -1642,8 +2791,10 @@ fn start_paste(dir: &Path, flag: Option<&str>) -> std::io::Result<Arc<Mutex<Past
 
 impl Render for Explorer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.polish != i18n::polish() {
+        let columns = crate::prefs::get(cx).columns.clone();
+        if self.polish != i18n::polish() || self.columns != columns {
             self.polish = i18n::polish();
+            self.columns = columns;
             self.table.update(cx, |t, cx| t.refresh(cx)); // column headers
         }
         if self.shown_hidden != crate::prefs::get(cx).show_hidden {
@@ -1664,22 +2815,29 @@ impl Render for Explorer {
             .px_3()
             .py_2() // the same gap under the tabs as above the file list
             .child(
-                Button::new("back")
-                    .cursor_pointer()
-                    .ghost()
-                    .icon(IconName::ArrowLeft)
-                    .disabled(!can_back)
-                    .tooltip(tr!("Back (Alt+Left)", "Wstecz (Alt+Left)"))
-                    .on_click(cx.listener(|this, _, w, cx| this.go_back(&GoBack, w, cx))),
+                self.history_menu(true, cx).child(
+                    Button::new("back")
+                        .cursor_pointer()
+                        .ghost()
+                        .icon(IconName::ArrowLeft)
+                        .disabled(!can_back)
+                        .tooltip(tr!(
+                            "Back (Alt+Left; right-click: history)",
+                            "Wstecz (Alt+Left; prawy przycisk: historia)"
+                        ))
+                        .on_click(cx.listener(|this, _, w, cx| this.go_back(&GoBack, w, cx))),
+                ),
             )
             .child(
-                Button::new("forward")
-                    .cursor_pointer()
-                    .ghost()
-                    .icon(IconName::ArrowRight)
-                    .disabled(!can_forward)
-                    .tooltip(tr!("Forward (Alt+Right)", "Dalej (Alt+Right)"))
-                    .on_click(cx.listener(|this, _, w, cx| this.go_forward(&GoForward, w, cx))),
+                self.history_menu(false, cx).child(
+                    Button::new("forward")
+                        .cursor_pointer()
+                        .ghost()
+                        .icon(IconName::ArrowRight)
+                        .disabled(!can_forward)
+                        .tooltip(tr!("Forward (Alt+Right)", "Dalej (Alt+Right)"))
+                        .on_click(cx.listener(|this, _, w, cx| this.go_forward(&GoForward, w, cx))),
+                ),
             )
             .child(
                 Button::new("up")
@@ -1697,7 +2855,39 @@ impl Render for Explorer {
                     .tooltip(tr!("Refresh (F5)", "Odśwież (F5)"))
                     .on_click(cx.listener(|this, _, w, cx| this.refresh(&Refresh, w, cx))),
             )
-            .child(div().flex_1().child(Input::new(&self.address)))
+            .children(self.search.clone().map(|input| {
+                let me = cx.weak_entity();
+                div()
+                    .w(px(240.))
+                    // Esc closes the search and shows the whole folder again.
+                    .on_key_down(move |e: &KeyDownEvent, window, cx| {
+                        if e.keystroke.key == "escape" {
+                            let _ = me.update(cx, |this, cx| this.close_search(window, cx));
+                            cx.stop_propagation();
+                        }
+                    })
+                    .child(Input::new(&input).prefix(Icon::new(IconName::Search).xsmall()))
+            }))
+            .child(if self.editing_address {
+                let me = cx.weak_entity();
+                div()
+                    .flex_1()
+                    // Esc: back to the crumbs, the path unchanged.
+                    .on_key_down(move |e: &KeyDownEvent, window, cx| {
+                        if e.keystroke.key == "escape" {
+                            let _ = me.update(cx, |this, cx| {
+                                this.editing_address = false;
+                                this.focus.focus(window, cx);
+                                cx.notify();
+                            });
+                            cx.stop_propagation();
+                        }
+                    })
+                    .child(Input::new(&self.address))
+                    .into_any_element()
+            } else {
+                self.crumbs(cx).into_any_element()
+            })
             .child(
                 Button::new("copy-path")
                     .cursor_pointer()
@@ -1708,6 +2898,27 @@ impl Render for Explorer {
                         "Kopiuj ścieżkę bez cudzysłowów (Ctrl+Alt+C)"
                     ))
                     .on_click(cx.listener(|this, _, w, cx| this.copy_path(&CopyPath, w, cx))),
+            )
+            .child(
+                Button::new("pane")
+                    .cursor_pointer()
+                    .ghost()
+                    .selected(self.pane_open)
+                    .icon(IconName::PanelRightOpen)
+                    .tooltip(tr!("Preview pane (Alt+P)", "Panel podglądu (Alt+P)"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.pane_open = !this.pane_open;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("grid")
+                    .cursor_pointer()
+                    .ghost()
+                    .selected(self.grid)
+                    .icon(IconName::LayoutDashboard)
+                    .tooltip(tr!("Thumbnails (Ctrl+Shift+G)", "Miniatury (Ctrl+Shift+G)"))
+                    .on_click(cx.listener(|this, _, w, cx| this.toggle_grid(&ToggleGrid, w, cx))),
             )
             .child(
                 Button::new("terminal")
@@ -1737,15 +2948,7 @@ impl Render for Explorer {
                         .label(tr!("Empty Recycle Bin", "Opróżnij kosz"))
                         .on_click(cx.listener(|this, _, w, cx| this.empty_bin(w, cx))),
                 )
-            })
-            .child(
-                Button::new("paste")
-                    .cursor_pointer()
-                    .primary()
-                    .label(tr!("Paste from RDP", "Wklej z RDP"))
-                    .tooltip("Ctrl+V")
-                    .on_click(cx.listener(|this, _, w, cx| this.paste_here(&PasteHere, w, cx))),
-            );
+            });
 
         let mut status = div()
             .h_flex()
@@ -1834,7 +3037,7 @@ impl Render for Explorer {
         div()
             .v_flex()
             .size_full()
-            .key_context(CONTEXT)
+            .key_context(if self.grid { "Explorer Grid" } else { CONTEXT })
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::go_forward))
@@ -1854,6 +3057,22 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::new_folder))
             .on_action(cx.listener(Self::clear_selection))
             .on_action(cx.listener(Self::properties))
+            .on_action(cx.listener(Self::toggle_grid))
+            .on_action(cx.listener(Self::search))
+            .on_action(cx.listener(|this, _: &TogglePane, _, cx| {
+                this.pane_open = !this.pane_open;
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &GridLeft, _, cx| this.grid_move(-1, cx)))
+            .on_action(cx.listener(|this, _: &GridRight, _, cx| this.grid_move(1, cx)))
+            .on_action(cx.listener(|this, _: &GridUp, _, cx| {
+                let cols = this.grid_columns() as isize;
+                this.grid_move(-cols, cx)
+            }))
+            .on_action(cx.listener(|this, _: &GridDown, _, cx| {
+                let cols = this.grid_columns() as isize;
+                this.grid_move(cols, cx)
+            }))
             .on_action(cx.listener(|_, _: &ToggleHidden, _, cx| {
                 crate::prefs::set(cx, |s| s.show_hidden = !s.show_hidden)
             }))
@@ -1897,17 +3116,28 @@ impl Render for Explorer {
                     }))
                     // Files dropped on the list (not on a folder row) land here.
                     .drag_over::<DraggedFiles>(move |s, _, _, _| s.border_color(drop_border))
-                    .on_drop(cx.listener(|this, d: &DraggedFiles, window, _| {
+                    .on_drop(cx.listener(|this, d: &DraggedFiles, window, cx| {
                         let here = this.history.current().to_path_buf();
-                        drop_files(d, &here, window, Some(this.changed.clone()))
+                        drop_files(d, &here, window, Some(this.changed.clone()), cx)
                     }))
-                    .child(if Place::of(self.history.current()) == Place::ThisPc {
-                        self.this_pc_view(cx).into_any_element()
-                    } else {
-                        DataTable::new(&self.table)
-                            .with_size(theme::table_size())
-                            .into_any_element()
-                    }),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .size_full()
+                            .child(div().flex_1().min_w_0().h_full().child(
+                                if Place::of(self.history.current()) == Place::ThisPc {
+                                    self.this_pc_view(cx).into_any_element()
+                                } else if self.grid {
+                                    self.grid_view(cx).into_any_element()
+                                } else {
+                                    DataTable::new(&self.table)
+                                        .with_size(theme::table_size())
+                                        .into_any_element()
+                                },
+                            ))
+                            .children(self.pane_open.then(|| self.side_pane(window, cx))),
+                    ),
             )
             .child(div().pt_2().child(status))
             .children(self.preview.as_ref().map(|p| {

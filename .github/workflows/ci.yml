@@ -1,7 +1,10 @@
 name: CI
 
+# Pull requests, and main after a merge. Not every branch push and tag as
+# well: the few Windows runners would run each change twice.
 on:
   push:
+    branches: [main]
   pull_request:
 
 jobs:

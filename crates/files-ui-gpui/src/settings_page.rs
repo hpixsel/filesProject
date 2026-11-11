@@ -29,6 +29,28 @@ fn options(pairs: &[(&str, String)]) -> Vec<(SharedString, SharedString)> {
         .collect()
 }
 
+/// A switch that shows or hides one list column.
+fn column(key: &'static str, title: String) -> SettingItem {
+    SettingItem::new(
+        title,
+        SettingField::switch(
+            move |cx| prefs::get(cx).columns.iter().any(|c| c == key),
+            move |on, cx| {
+                prefs::set(cx, |s| {
+                    s.columns.retain(|c| c != key);
+                    if on {
+                        // Back in the usual order: size, modified, type.
+                        s.columns.push(key.into());
+                        let order =
+                            |c: &String| ["size", "modified", "type"].iter().position(|k| k == c);
+                        s.columns.sort_by_key(order);
+                    }
+                })
+            },
+        ),
+    )
+}
+
 fn page(picker: Entity<ColorPickerState>) -> Settings {
     let font = |ix: usize, title: String| {
         SettingItem::new(
@@ -133,6 +155,19 @@ fn page(picker: Entity<ColorPickerState>) -> Settings {
                     "Pliki ukryte i systemowe, np. desktop.ini."
                 )),
             ),
+        )
+        .group(
+            SettingGroup::new()
+                .title(tr!("Columns", "Kolumny"))
+                .description(tr!(
+                    "Drag a header's edge to change its width; it is kept.",
+                    "Przeciągnij krawędź nagłówka, żeby zmienić szerokość; zostanie zapamiętana."
+                ))
+                .items([
+                    column("size", tr!("Size", "Rozmiar")),
+                    column("modified", tr!("Modified", "Zmodyfikowano")),
+                    column("type", tr!("Type", "Typ")),
+                ]),
         )
         .group(
             SettingGroup::new().title(tr!("Tabs", "Karty")).item(SettingItem::new(

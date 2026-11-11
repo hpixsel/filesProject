@@ -1,6 +1,7 @@
 //! The only crate with `unsafe`, COM, OLE and Win32 calls. Exposes safe types.
 
 pub mod clipboard;
+pub mod drag;
 pub mod drop;
 #[cfg(feature = "fake")]
 pub mod fake;
@@ -10,6 +11,7 @@ pub mod io;
 pub mod process;
 pub mod shell;
 pub mod sta;
+pub mod watch;
 
 pub use clipboard::{clipboard_object, formats, ContentReader, VirtualFiles};
 pub use sta::Sta;

@@ -6,6 +6,8 @@
 mod assets;
 mod explorer;
 mod i18n;
+mod ops;
+mod palette;
 mod prefs;
 mod settings_page;
 mod theme;
