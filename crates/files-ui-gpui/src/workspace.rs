@@ -627,7 +627,14 @@ impl Workspace {
                 Tab::new()
                     .cursor_pointer()
                     .label(tab.read(cx).title())
-                    .suffix(close),
+                    .suffix(close)
+                    // Like a browser: the middle button closes a tab.
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |this, _, window, cx| {
+                            this.close(pane_ix, tab_ix, window, cx)
+                        }),
+                    ),
             );
         }
         let border = if focused {
