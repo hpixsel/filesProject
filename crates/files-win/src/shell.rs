@@ -13,8 +13,8 @@ use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificL
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
     DefSubclassProc, IContextMenu, IContextMenu3, IShellFolder, RemoveWindowSubclass,
-    SHBindToParent, SHParseDisplayName, SetWindowSubclass, ShellExecuteW, CMF_NORMAL,
-    CMINVOKECOMMANDINFO,
+    SHBindToObject, SHBindToParent, SHParseDisplayName, SetWindowSubclass, ShellExecuteW,
+    CMF_CANRENAME, CMF_NORMAL, CMINVOKECOMMANDINFO, GCS_VERBA,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, DestroyMenu, GetCursorPos, TrackPopupMenuEx, SW_SHOWNORMAL, TPM_RETURNCMD,
@@ -102,62 +102,100 @@ extern "system" fn menu_subclass(
     unsafe { DefSubclassProc(h, msg, wp, lp) }
 }
 
-/// Shows Explorer's context menu for `path` at the cursor and runs the chosen
-/// command. Runs a modal message loop: call it outside UI-framework event
-/// dispatch (e.g. from a spawned task). Returns whether a command ran.
-pub fn context_menu(window: isize, paths: &[PathBuf]) -> crate::Result<bool> {
+/// What the user chose in a shell menu.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Picked {
+    Nothing,
+    /// A command ran; the folder may have changed.
+    Ran,
+    /// "Rename": Explorer edits the name in place, so the caller does.
+    Rename,
+}
+
+/// Explorer's own context menu for `paths` (all in one folder), at the
+/// cursor. Modal: call it outside GPUI's event dispatch.
+pub fn context_menu(window: isize, paths: &[PathBuf]) -> crate::Result<Picked> {
     let h = hwnd(window);
     let pidls = Pidls::parse(paths)?;
-    // SAFETY: standard shell calls; the PIDLs live until `pidls` drops and
-    // the menu is destroyed.
+    // SAFETY: standard shell calls; the PIDLs live until `pidls` drops.
     unsafe {
-        let result = (|| -> crate::Result<bool> {
-            // The items share a folder; each child ID points into its own PIDL.
-            let mut folder: Option<IShellFolder> = None;
-            let mut children = Vec::with_capacity(pidls.0.len());
-            for &p in &pidls.0 {
-                let mut child: *mut ITEMIDLIST = std::ptr::null_mut();
-                let f: IShellFolder = SHBindToParent(p, Some(&mut child))?;
-                folder.get_or_insert(f);
-                children.push(child as *const ITEMIDLIST);
-            }
-            let folder = folder.ok_or(crate::Error::BadDescriptor("no items"))?;
-            let cm: IContextMenu = folder.GetUIObjectOf(h, &children, None)?;
-            let menu = CreatePopupMenu()?;
-            cm.QueryContextMenu(menu, 0, 1, 0x7FFF, CMF_NORMAL)?;
-
-            MENU.with(|m| *m.borrow_mut() = cm.cast::<IContextMenu3>().ok());
-            let _ = SetWindowSubclass(h, Some(menu_subclass), 1, 0);
-            let mut pt = POINT::default();
-            let _ = GetCursorPos(&mut pt);
-            let cmd = TrackPopupMenuEx(
-                menu,
-                (TPM_RETURNCMD | TPM_RIGHTBUTTON).0,
-                pt.x,
-                pt.y,
-                h,
-                None,
-            )
-            .0;
-            let _ = RemoveWindowSubclass(h, Some(menu_subclass), 1);
-            MENU.with(|m| *m.borrow_mut() = None);
-
-            let ran = cmd > 0;
-            if ran {
-                let info = CMINVOKECOMMANDINFO {
-                    cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
-                    hwnd: h,
-                    lpVerb: PCSTR((cmd - 1) as usize as *const u8),
-                    nShow: SW_SHOWNORMAL.0,
-                    ..Default::default()
-                };
-                cm.InvokeCommand(&info)?;
-            }
-            let _ = DestroyMenu(menu);
-            Ok(ran)
-        })();
-        result
+        // The items share a folder; each child ID points into its own PIDL.
+        let mut folder: Option<IShellFolder> = None;
+        let mut children = Vec::with_capacity(pidls.0.len());
+        for &p in &pidls.0 {
+            let mut child: *mut ITEMIDLIST = std::ptr::null_mut();
+            let f: IShellFolder = SHBindToParent(p, Some(&mut child))?;
+            folder.get_or_insert(f);
+            children.push(child as *const ITEMIDLIST);
+        }
+        let folder = folder.ok_or(crate::Error::BadDescriptor("no items"))?;
+        let cm: IContextMenu = folder.GetUIObjectOf(h, &children, None)?;
+        track(h, &cm, CMF_NORMAL | CMF_CANRENAME)
     }
+}
+
+/// Explorer's menu for the empty space of folder `dir`: New (folder, file
+/// types), Paste, Properties and so on. Modal, like [`context_menu`].
+pub fn folder_menu(window: isize, dir: &Path) -> crate::Result<Picked> {
+    let h = hwnd(window);
+    let pidls = Pidls::parse(&[dir.to_path_buf()])?;
+    // SAFETY: as above; the folder's PIDL lives until `pidls` drops.
+    unsafe {
+        let folder: IShellFolder = SHBindToObject(None, pidls.0[0], None)?;
+        let cm: IContextMenu = folder.CreateViewObject(h)?;
+        track(h, &cm, CMF_NORMAL)
+    }
+}
+
+/// Shows `cm` at the cursor and runs the chosen command, except "rename",
+/// which is handed back.
+unsafe fn track(h: HWND, cm: &IContextMenu, flags: u32) -> crate::Result<Picked> {
+    let menu = CreatePopupMenu()?;
+    let result = (|| -> crate::Result<Picked> {
+        cm.QueryContextMenu(menu, 0, 1, 0x7FFF, flags)?;
+        // Owner-drawn and "New" submenus need their messages forwarded.
+        MENU.with(|m| *m.borrow_mut() = cm.cast::<IContextMenu3>().ok());
+        let _ = SetWindowSubclass(h, Some(menu_subclass), 1, 0);
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let cmd = TrackPopupMenuEx(
+            menu,
+            (TPM_RETURNCMD | TPM_RIGHTBUTTON).0,
+            pt.x,
+            pt.y,
+            h,
+            None,
+        )
+        .0;
+        let _ = RemoveWindowSubclass(h, Some(menu_subclass), 1);
+        MENU.with(|m| *m.borrow_mut() = None);
+        if cmd <= 0 {
+            return Ok(Picked::Nothing);
+        }
+        let id = (cmd - 1) as usize;
+        let mut verb = [0u8; 64];
+        let named = cm.GetCommandString(
+            id,
+            GCS_VERBA,
+            None,
+            windows::core::PSTR(verb.as_mut_ptr()),
+            verb.len() as u32,
+        );
+        if named.is_ok() && verb.starts_with(b"rename\0") {
+            return Ok(Picked::Rename);
+        }
+        let info = CMINVOKECOMMANDINFO {
+            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
+            hwnd: h,
+            lpVerb: PCSTR(id as *const u8),
+            nShow: SW_SHOWNORMAL.0,
+            ..Default::default()
+        };
+        cm.InvokeCommand(&info)?;
+        Ok(Picked::Ran)
+    })();
+    let _ = DestroyMenu(menu);
+    result
 }
 
 /// Absolute PIDLs for paths, freed on drop.

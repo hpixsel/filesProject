@@ -5,6 +5,7 @@ use files_app::{format_size, list_dir, History, Item};
 use files_core::machine::{self, Event};
 use files_core::Progress;
 use files_jobs::sizes::{scan_sizes, SizeScan};
+use files_win::shell::Picked;
 use gpui_kit::component::button::*;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::table::*;
@@ -419,13 +420,23 @@ impl TableDelegate for Listing {
                 let (Some(h), false) = (hwnd(window), paths.is_empty()) else {
                     return;
                 };
-                let changed = l.changed.clone();
+                let (changed, me) = (l.changed.clone(), l.explorer.clone());
+                let handle = window.window_handle();
+                cx.stop_propagation(); // not the folder's own menu as well
                 cx.notify();
-                outside_dispatch(cx, move || {
-                    if let Ok(true) = files_win::shell::context_menu(h, &paths) {
-                        changed.store(true, Ordering::SeqCst);
-                    }
-                });
+                // The menu runs its own message loop: outside GPUI's dispatch.
+                cx.spawn(
+                    async move |_, cx| match files_win::shell::context_menu(h, &paths) {
+                        Ok(Picked::Ran) => changed.store(true, Ordering::SeqCst),
+                        Ok(Picked::Rename) => {
+                            let _ = cx.update_window(handle, |_, window, cx| {
+                                let _ = me.update(cx, |e, cx| e.rename(&Rename, window, cx));
+                            });
+                        }
+                        _ => {}
+                    },
+                )
+                .detach();
             }),
         )
     }
@@ -447,6 +458,10 @@ impl TableDelegate for Listing {
                 match &self.renaming {
                     Some((path, input)) if *path == item.path => {
                         let me = self.explorer.clone();
+                        let input_size = match theme::table_size() {
+                            gpui_kit::component::Size::XSmall => gpui_kit::component::Size::XSmall,
+                            _ => gpui_kit::component::Size::Small,
+                        };
                         cell.child(
                             div()
                                 .flex_1()
@@ -457,7 +472,10 @@ impl TableDelegate for Listing {
                                         cx.stop_propagation();
                                     }
                                 })
-                                .child(Input::new(input).xsmall()),
+                                // The table's text size, and pulled left by the
+                                // field's padding and border so the name stays put.
+                                .ml(-(input_size.input_px() + px(1.)))
+                                .child(Input::new(input).with_size(input_size)),
                         )
                     }
                     _ => cell.child(item.name.clone()),
@@ -815,6 +833,21 @@ impl Explorer {
         self.table.update(cx, |t, cx| {
             t.delegate_mut().renaming = Some((path, input));
             cx.notify();
+        });
+    }
+
+    /// Explorer's menu for the folder itself: New folder or file, Paste,
+    /// Properties.
+    fn folder_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = self.history.current().to_path_buf();
+        let (Some(h), Place::Folder) = (hwnd(window), Place::of(&dir)) else {
+            return;
+        };
+        let changed = self.changed.clone();
+        outside_dispatch(cx, move || {
+            if let Ok(Picked::Ran) = files_win::shell::folder_menu(h, &dir) {
+                changed.store(true, Ordering::SeqCst);
+            }
         });
     }
 
@@ -1456,6 +1489,11 @@ impl Render for Explorer {
                     .border_1()
                     .border_color(cx.theme().border)
                     .overflow_hidden()
+                    // Right-click on the empty space: the folder's own menu (New, Paste...).
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, _, window, cx| this.folder_menu(window, cx)),
+                    )
                     // Files dropped on the list (not on a folder row) land here.
                     .drag_over::<DraggedFiles>(move |s, _, _, _| s.border_color(drop_border))
                     .on_drop(cx.listener(|this, d: &DraggedFiles, window, _| {
