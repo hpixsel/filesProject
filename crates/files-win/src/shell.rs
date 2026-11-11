@@ -388,3 +388,32 @@ pub fn add_to_user_path(dir: &Path) -> crate::Result<()> {
     let _ = unsafe { RegCloseKey(key) };
     result
 }
+
+/// A drive's volume label ("Data"), or `None` when it has none or does not
+/// answer. Can be slow for a network drive: call it off the UI thread.
+pub fn volume_label(root: &Path) -> Option<String> {
+    use windows::Win32::Storage::FileSystem::GetVolumeInformationW;
+    let mut name = [0u16; 261];
+    // SAFETY: a NUL-terminated root and a buffer the API fills.
+    unsafe {
+        GetVolumeInformationW(
+            &HSTRING::from(root.as_os_str()),
+            Some(&mut name),
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+    .ok()?;
+    let end = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+    (end > 0).then(|| String::from_utf16_lossy(&name[..end]))
+}
+
+/// Windows' "Empty Recycle Bin", with its own confirmation and progress.
+/// Modal: call it outside GPUI's event dispatch.
+pub fn empty_recycle_bin(window: isize) -> bool {
+    use windows::Win32::UI::Shell::SHEmptyRecycleBinW;
+    // SAFETY: a valid owner window; no root means every drive.
+    unsafe { SHEmptyRecycleBinW(hwnd(window), PCWSTR::null(), 0) }.is_ok()
+}

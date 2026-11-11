@@ -16,6 +16,8 @@ macro_rules! own {
 
 const OWN: &[(&str, &[u8])] = own!(
     "app",
+    "monitor",
+    "trash",
     "file-archive",
     "file-code",
     "file-cog",

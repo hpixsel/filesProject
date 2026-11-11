@@ -1,10 +1,12 @@
 //! The window: title bar, sidebar (favourites, drives), one or two panes,
 //! each pane with its own tabs. Every tab is an `Explorer`.
 
-use crate::explorer::{self, Explorer};
+use crate::explorer::{self, Explorer, OpenInNewTab};
 use crate::i18n::{self, tr};
 use crate::theme;
 use files_app::favourites;
+use files_app::places;
+use files_app::session;
 use files_app::settings::{self, Settings};
 use files_app::update;
 use gpui_kit::component::button::*;
@@ -84,14 +86,48 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// `explicit`: `start` was asked for (`files <folder>`); with restored
+    /// tabs it opens as a new one, otherwise it is the only tab.
     pub fn new(
         start: PathBuf,
+        explicit: bool,
         settings: Settings,
         incoming: std::sync::mpsc::Receiver<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let first = cx.new(|cx| Explorer::new(start, window, cx));
+        let saved = settings
+            .restore_tabs
+            .then(|| session::file().and_then(|f| session::load(&f)))
+            .flatten();
+        let (panes, active_pane) = match &saved {
+            Some(s) => (
+                s.panes
+                    .iter()
+                    .map(|(dirs, active)| Pane {
+                        tabs: dirs
+                            .iter()
+                            .map(|d| Self::explorer(d.clone(), window, cx))
+                            .collect(),
+                        active: *active,
+                    })
+                    .collect(),
+                s.active_pane,
+            ),
+            None => (
+                vec![Pane {
+                    tabs: vec![Self::explorer(start.clone(), window, cx)],
+                    active: 0,
+                }],
+                0,
+            ),
+        };
+        // Saved on every exit, the updater's restart included.
+        cx.on_app_quit(|this: &mut Self, cx| {
+            this.save_session(cx);
+            async {}
+        })
+        .detach();
         let accent = theme::accent(&settings);
         let picker = cx.new(|cx| ColorPickerState::new(window, cx).default_value(accent));
         cx.subscribe_in(
@@ -127,12 +163,9 @@ impl Workspace {
             }
         })
         .detach();
-        let this = Workspace {
-            panes: vec![Pane {
-                tabs: vec![first],
-                active: 0,
-            }],
-            active_pane: 0,
+        let mut this = Workspace {
+            panes,
+            active_pane,
             favourites: favourites::file()
                 .map(|f| favourites::load(&f))
                 .unwrap_or_default(),
@@ -167,8 +200,33 @@ impl Workspace {
                 eprintln!("drag and drop is off: {e}");
             }
         }
+        if saved.is_some() && explicit {
+            this.open_tab(start, window, cx);
+        }
         this.focus_active(window, cx);
         this
+    }
+
+    fn save_session(&self, cx: &App) {
+        let s = session::Session {
+            panes: self
+                .panes
+                .iter()
+                .map(|p| {
+                    let dirs = p
+                        .tabs
+                        .iter()
+                        .map(|t| t.read(cx).current_dir().to_path_buf());
+                    (dirs.collect(), p.active)
+                })
+                .collect(),
+            active_pane: self.active_pane,
+        };
+        if let Some(f) = session::file() {
+            if let Err(e) = session::save(&f, &s) {
+                eprintln!("cannot save tabs: {e}");
+            }
+        }
     }
 
     fn active(&self) -> &Entity<Explorer> {
@@ -181,12 +239,47 @@ impl Workspace {
         cx.notify();
     }
 
-    fn open_tab(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    /// A new tab's view; its middle-clicked folders open as background tabs
+    /// next to it.
+    fn explorer(dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Entity<Explorer> {
         let tab = cx.new(|cx| Explorer::new(dir, window, cx));
-        let pane = &mut self.panes[self.active_pane];
+        cx.subscribe_in(&tab, window, |this, tab, e: &OpenInNewTab, window, cx| {
+            let pane = this.panes.iter().position(|p| p.tabs.contains(tab));
+            this.add_tab(
+                e.0.clone(),
+                pane.unwrap_or(this.active_pane),
+                false,
+                window,
+                cx,
+            );
+        })
+        .detach();
+        tab
+    }
+
+    /// Opens `dir` in a new tab right after the current one of `pane_ix`;
+    /// `focus` switches to it, otherwise it opens in the background.
+    fn add_tab(
+        &mut self,
+        dir: PathBuf,
+        pane_ix: usize,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let tab = Self::explorer(dir, window, cx);
+        let pane = &mut self.panes[pane_ix];
         pane.tabs.insert(pane.active + 1, tab);
-        pane.active += 1;
-        self.focus_active(window, cx);
+        if focus {
+            pane.active += 1;
+            self.active_pane = pane_ix;
+            self.focus_active(window, cx);
+        }
+        cx.notify();
+    }
+
+    fn open_tab(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.add_tab(dir, self.active_pane, true, window, cx);
     }
 
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -244,7 +337,7 @@ impl Workspace {
             self.active_pane = 0;
         } else {
             let dir = self.active().read(cx).current_dir().to_path_buf();
-            let tab = cx.new(|cx| Explorer::new(dir, window, cx));
+            let tab = Self::explorer(dir, window, cx);
             self.panes.push(Pane {
                 tabs: vec![tab],
                 active: 0,
@@ -365,29 +458,36 @@ impl Workspace {
             cx.theme().primary,
             cx.theme().radius,
         );
-        let entry = |id: SharedString,
-                     label: String,
-                     icon: IconName,
-                     path: PathBuf,
-                     cx: &mut Context<Self>| {
-            div()
-                .id(id)
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap_2()
-                .w_full()
-                .px_2()
-                .py_1()
-                .rounded(radius)
-                .cursor_pointer()
-                .hover(move |s| s.bg(hover))
-                .child(Icon::new(icon).text_color(icon_color))
-                .child(div().truncate().child(label))
-                .on_click(
-                    cx.listener(move |this, _, window, cx| this.go_to(path.clone(), window, cx)),
-                )
-        };
+        let entry =
+            |id: SharedString, label: String, icon: Icon, path: PathBuf, cx: &mut Context<Self>| {
+                let background = path.clone();
+                div()
+                    .id(id)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .rounded(radius)
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .child(icon.text_color(icon_color))
+                    .child(div().truncate().child(label))
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| {
+                            this.go_to(path.clone(), window, cx)
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |this, _, window, cx| {
+                            let pane = this.active_pane;
+                            this.add_tab(background.clone(), pane, false, window, cx)
+                        }),
+                    )
+            };
         let mut side = div()
             .v_flex()
             .w(px(200.))
@@ -408,7 +508,7 @@ impl Workspace {
             side = side.child(entry(
                 format!("fav-{i}").into(),
                 name,
-                IconName::Star,
+                Icon::new(IconName::Star),
                 p.clone(),
                 cx,
             ));
@@ -441,6 +541,23 @@ impl Workspace {
                     false,
                 )),
         );
+        for (id, label, icon, place) in [
+            (
+                "this-pc",
+                tr!("This PC", "Ten komputer"),
+                "monitor",
+                places::THIS_PC,
+            ),
+            (
+                "bin",
+                tr!("Recycle Bin", "Kosz"),
+                "trash",
+                places::RECYCLE_BIN,
+            ),
+        ] {
+            let icon = Icon::empty().path(format!("icons/{icon}.svg"));
+            side = side.child(entry(id.into(), label, icon, place.into(), cx));
+        }
         for (i, (d, share)) in self.drives.iter().enumerate() {
             let icon = if share.is_some() {
                 IconName::Network
@@ -450,7 +567,7 @@ impl Workspace {
             let row = entry(
                 format!("drive-{i}").into(),
                 d.display().to_string(),
-                icon,
+                Icon::new(icon),
                 d.clone(),
                 cx,
             );

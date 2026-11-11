@@ -1,6 +1,7 @@
-//! Opening folders, drives and Win+E with FilesProject instead of Explorer,
-//! and undoing it (docs/designs/replace_explorer.md). Everything goes
-//! through Windows' `reg.exe` and `.reg` text, under HKCU only.
+//! Opening folders, drives, Win+E, This PC and the Recycle Bin with
+//! FilesProject instead of Explorer, and undoing it
+//! (docs/designs/replace_explorer.md). Everything goes through Windows'
+//! `reg.exe` and `.reg` text, under HKCU only.
 
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -9,10 +10,24 @@ use std::process::Command;
 pub type Result<T> = std::result::Result<T, String>;
 
 /// The keys we change; exported before the first change.
-const KEYS: [&str; 3] = [
+const KEYS: [&str; 5] = [
     r"HKCU\Software\Classes\Directory\shell",
     r"HKCU\Software\Classes\Drive\shell",
     r"HKCU\Software\Classes\CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\shell\opennewwindow",
+    r"HKCU\Software\Classes\CLSID\{20D04FE0-3AEA-1069-A2D8-08002B30309D}\shell",
+    r"HKCU\Software\Classes\CLSID\{645FF040-5081-101B-9F08-08002B30309D}\shell",
+];
+
+/// This PC and the Recycle Bin: their CLSIDs and our name for them.
+const PLACES: [(&str, &str); 2] = [
+    (
+        "{20D04FE0-3AEA-1069-A2D8-08002B30309D}",
+        crate::places::THIS_PC,
+    ),
+    (
+        "{645FF040-5081-101B-9F08-08002B30309D}",
+        crate::places::RECYCLE_BIN,
+    ),
 ];
 
 /// Undoes our keys; also shipped for a double-click without the program.
@@ -52,27 +67,50 @@ fn import(text: &str) -> Result<()> {
     r
 }
 
-/// `.reg` text pointing folders, drives and Win+E at `exe`.
+/// One `.reg` key block: `[key]` and its `name=value` lines.
+fn block(key: &str, values: &[(&str, &str)]) -> String {
+    let mut s = format!("\r\n[HKEY_CURRENT_USER\\Software\\Classes\\{key}]\r\n");
+    for (name, value) in values {
+        s += &format!("{name}=\"{value}\"\r\n");
+    }
+    s
+}
+
+/// `.reg` text pointing folders, drives, Win+E, This PC and the Recycle Bin
+/// at `exe`.
 fn replace_reg(exe: &Path) -> String {
     // .reg strings escape `\` and `"`.
     let q = |s: &str| s.replace('\\', r"\\").replace('"', r#"\""#);
     let exe = exe.to_string_lossy();
-    let open = q(&format!(r#""{exe}" "%1""#));
-    let plain = q(&format!(r#""{exe}""#));
     let mut text = String::from("Windows Registry Editor Version 5.00\r\n");
     for class in ["Directory", "Drive"] {
-        let base = format!(r"HKEY_CURRENT_USER\Software\Classes\{class}\shell");
-        text += &format!("\r\n[{base}]\r\n@=\"FilesProject\"\r\n");
-        text += &format!("\r\n[{base}\\FilesProject]\r\n@=\"Open in FilesProject\"\r\n");
-        text += &format!("\r\n[{base}\\FilesProject\\command]\r\n@=\"{open}\"\r\n");
+        let open = q(&format!(r#""{exe}" "%1""#));
+        text += &block(&format!(r"{class}\shell"), &[("@", "FilesProject")]);
+        text += &block(
+            &format!(r"{class}\shell\FilesProject"),
+            &[("@", "Open in FilesProject")],
+        );
+        text += &block(
+            &format!(r"{class}\shell\FilesProject\command"),
+            &[("@", &open)],
+        );
     }
-    text += &format!(
-        "\r\n[HKEY_CURRENT_USER\\Software\\Classes\\CLSID\\{{52205fd8-5dfb-447d-801a-d0b52f2e83e1}}\\shell\\opennewwindow\\command]\r\n@=\"{plain}\"\r\n\"DelegateExecute\"=\"\"\r\n"
-    );
+    let win_e = r"CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\shell\opennewwindow\command";
+    let plain = q(&format!(r#""{exe}""#));
+    text += &block(win_e, &[("@", &plain), ("\"DelegateExecute\"", "")]);
+    for (clsid, place) in PLACES {
+        let command = q(&format!(r#""{exe}" {place}"#));
+        text += &block(&format!(r"CLSID\{clsid}\shell"), &[("@", "open")]);
+        text += &block(
+            &format!(r"CLSID\{clsid}\shell\open\command"),
+            &[("@", &command), ("\"DelegateExecute\"", "")],
+        );
+    }
     text
 }
 
-/// Folders, drives and Win+E open the installed FilesProject.
+/// Folders, drives, Win+E, This PC and the Recycle Bin open the installed
+/// FilesProject.
 pub fn replace() -> Result<()> {
     let exe = super::update::install_dir()
         .map(|d| d.join("files.exe"))
@@ -119,15 +157,20 @@ mod tests {
         let text = replace_reg(Path::new(r"C:\Users\Zażółć Ąę\files.exe"));
         assert!(text.contains(r#"@="\"C:\\Users\\Zażółć Ąę\\files.exe\" \"%1\"""#));
         assert!(text.contains(r#"@="\"C:\\Users\\Zażółć Ąę\\files.exe\"""#));
+        assert!(text.contains(r#"@="\"C:\\Users\\Zażółć Ąę\\files.exe\" shell:RecycleBinFolder""#));
         assert!(text.contains("\"DelegateExecute\"=\"\""));
         assert_eq!(text.matches("@=\"FilesProject\"").count(), 2);
+        assert_eq!(text.matches("@=\"open\"").count(), 2);
         // What restore removes is what replace adds.
         for key in [
             r"Directory\shell\FilesProject]",
             r"Drive\shell\FilesProject]",
             "opennewwindow]",
+            r"{20D04FE0-3AEA-1069-A2D8-08002B30309D}\shell\open]",
+            r"{645FF040-5081-101B-9F08-08002B30309D}\shell\open]",
         ] {
             assert!(RESTORE.contains(key), "{key}");
+            assert!(text.contains(&key.replace(']', "")), "{key}");
         }
     }
 }

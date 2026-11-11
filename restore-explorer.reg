@@ -12,3 +12,12 @@ Windows Registry Editor Version 5.00
 @=-
 
 [-HKEY_CURRENT_USER\Software\Classes\CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\shell\opennewwindow]
+
+; This PC and the Recycle Bin
+[-HKEY_CURRENT_USER\Software\Classes\CLSID\{20D04FE0-3AEA-1069-A2D8-08002B30309D}\shell\open]
+[HKEY_CURRENT_USER\Software\Classes\CLSID\{20D04FE0-3AEA-1069-A2D8-08002B30309D}\shell]
+@=-
+
+[-HKEY_CURRENT_USER\Software\Classes\CLSID\{645FF040-5081-101B-9F08-08002B30309D}\shell\open]
+[HKEY_CURRENT_USER\Software\Classes\CLSID\{645FF040-5081-101B-9F08-08002B30309D}\shell]
+@=-

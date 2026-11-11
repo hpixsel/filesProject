@@ -1,5 +1,6 @@
 //! The explorer pane: toolbar, address bar, file table, status bar.
 
+use files_app::places::{self, Place};
 use files_app::{format_size, list_dir, History, Item};
 use files_core::machine::{self, Event};
 use files_core::Progress;
@@ -8,6 +9,7 @@ use gpui_kit::component::button::*;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::table::*;
 use gpui_kit::component::*;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::collections::{BTreeSet, HashMap};
 use std::io::BufRead;
@@ -42,6 +44,12 @@ actions!(
 
 const CONTEXT: &str = "Explorer";
 
+/// A folder middle-clicked in the list: the workspace opens it as a
+/// background tab.
+pub struct OpenInNewTab(pub PathBuf);
+
+impl EventEmitter<OpenInNewTab> for Explorer {}
+
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("alt-left", GoBack, Some(CONTEXT)),
@@ -73,6 +81,33 @@ pub fn hwnd(window: &Window) -> Option<isize> {
 /// Runs a shell call that may start a modal message loop (menus, dialogs)
 /// from a task, outside GPUI's event dispatch: inside it, the nested loop
 /// re-enters GPUI while its state is borrowed and the app panics.
+/// The items at `dir`: a folder, or This PC (drives with free space), or
+/// the Recycle Bin. Runs off the UI thread; drives can be slow to answer.
+fn list(dir: &Path) -> std::io::Result<Vec<Item>> {
+    let drives = files_win::shell::drives;
+    Ok(match Place::of(dir) {
+        Place::Folder => return list_dir(dir),
+        Place::RecycleBin => places::recycle_bin(&drives()),
+        Place::ThisPc => drives()
+            .into_iter()
+            .map(|root| {
+                let letter = root.display().to_string();
+                let label = files_win::shell::network_path(&root)
+                    .or_else(|| files_win::shell::volume_label(&root))
+                    .unwrap_or_else(|| tr!("Local Disk", "Dysk lokalny"));
+                Item {
+                    name: format!("{label} ({})", letter.trim_end_matches('\\')),
+                    size: files_win::io::free_bytes(&root).ok(),
+                    path: root,
+                    is_dir: true,
+                    modified: None,
+                    origin: None,
+                }
+            })
+            .collect(),
+    })
+}
+
 /// Icon file (in `assets/icons`) and hue for a file or folder, from its
 /// name. A `None` hue keeps the default colour (accent folder, muted file);
 /// `None` overall is the plain folder or file icon.
@@ -140,6 +175,10 @@ pub struct Listing {
     marked: BTreeSet<usize>,
     /// Where a Shift+click range starts.
     anchor: Option<usize>,
+    /// This PC and the Recycle Bin show other columns.
+    place: Place,
+    /// The view that owns this list, which emits `OpenInNewTab`.
+    explorer: WeakEntity<Explorer>,
 }
 
 impl Listing {
@@ -154,7 +193,11 @@ impl Listing {
 
 impl TableDelegate for Listing {
     fn columns_count(&self, _: &App) -> usize {
-        3
+        if self.place == Place::RecycleBin {
+            4
+        } else {
+            3
+        }
     }
     fn rows_count(&self, _: &App) -> usize {
         self.items.len()
@@ -162,8 +205,16 @@ impl TableDelegate for Listing {
     fn column(&self, col_ix: usize, _: &App) -> Column {
         match col_ix {
             0 => Column::new("name", tr!("Name", "Nazwa")).width(px(440.)),
+            1 if self.place == Place::ThisPc => {
+                Column::new("size", tr!("Free", "Wolne")).width(px(110.))
+            }
             1 => Column::new("size", tr!("Size", "Rozmiar")).width(px(110.)),
-            _ => Column::new("modified", tr!("Modified", "Zmodyfikowano")).width(px(160.)),
+            2 if self.place == Place::RecycleBin => {
+                Column::new("modified", tr!("Deleted", "Usunięto")).width(px(160.))
+            }
+            2 => Column::new("modified", tr!("Modified", "Zmodyfikowano")).width(px(160.)),
+            _ => Column::new("origin", tr!("Original location", "Oryginalna lokalizacja"))
+                .width(px(320.)),
         }
     }
     fn render_tr(
@@ -179,49 +230,59 @@ impl TableDelegate for Listing {
         } else {
             row
         };
-        row
-            // Ctrl+click toggles a row, Shift+click selects a range; plain
-            // clicks and arrow keys arrive as TableEvent::SelectRow.
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |t, e: &MouseDownEvent, _, cx| {
-                    let l = t.delegate_mut();
-                    if e.modifiers.shift {
-                        let from = l.anchor.unwrap_or(row_ix);
-                        l.marked = (from.min(row_ix)..=from.max(row_ix)).collect();
-                    } else if e.modifiers.control {
-                        if !l.marked.remove(&row_ix) {
-                            l.marked.insert(row_ix);
-                        }
-                        l.anchor = Some(row_ix);
-                    } else {
-                        return;
+        let explorer = self.explorer.clone();
+        let middle = self
+            .items
+            .get(row_ix)
+            .filter(|i| i.is_dir)
+            .map(|i| i.path.clone());
+        row.on_mouse_down(MouseButton::Middle, move |_, _, cx| {
+            if let Some(dir) = middle.clone() {
+                let _ = explorer.update(cx, |_, cx| cx.emit(OpenInNewTab(dir)));
+            }
+        })
+        // Ctrl+click toggles a row, Shift+click selects a range; plain
+        // clicks and arrow keys arrive as TableEvent::SelectRow.
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |t, e: &MouseDownEvent, _, cx| {
+                let l = t.delegate_mut();
+                if e.modifiers.shift {
+                    let from = l.anchor.unwrap_or(row_ix);
+                    l.marked = (from.min(row_ix)..=from.max(row_ix)).collect();
+                } else if e.modifiers.control {
+                    if !l.marked.remove(&row_ix) {
+                        l.marked.insert(row_ix);
                     }
-                    cx.notify();
-                }),
-            )
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(move |t, _: &MouseDownEvent, window, cx| {
-                    let l = t.delegate_mut();
-                    // Like Explorer: right-clicking outside the selection selects that row.
-                    if !l.marked.contains(&row_ix) {
-                        l.marked = [row_ix].into();
-                        l.anchor = Some(row_ix);
+                    l.anchor = Some(row_ix);
+                } else {
+                    return;
+                }
+                cx.notify();
+            }),
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |t, _: &MouseDownEvent, window, cx| {
+                let l = t.delegate_mut();
+                // Like Explorer: right-clicking outside the selection selects that row.
+                if !l.marked.contains(&row_ix) {
+                    l.marked = [row_ix].into();
+                    l.anchor = Some(row_ix);
+                }
+                let paths = l.marked_paths();
+                let (Some(h), false) = (hwnd(window), paths.is_empty()) else {
+                    return;
+                };
+                let changed = l.changed.clone();
+                cx.notify();
+                outside_dispatch(cx, move || {
+                    if let Ok(true) = files_win::shell::context_menu(h, &paths) {
+                        changed.store(true, Ordering::SeqCst);
                     }
-                    let paths = l.marked_paths();
-                    let (Some(h), false) = (hwnd(window), paths.is_empty()) else {
-                        return;
-                    };
-                    let changed = l.changed.clone();
-                    cx.notify();
-                    outside_dispatch(cx, move || {
-                        if let Ok(true) = files_win::shell::context_menu(h, &paths) {
-                            changed.store(true, Ordering::SeqCst);
-                        }
-                    });
-                }),
-            )
+                });
+            }),
+        )
     }
     fn render_td(
         &mut self,
@@ -253,9 +314,15 @@ impl TableDelegate for Listing {
                 };
                 div().text_color(muted).child(size)
             }
-            _ => div().text_color(muted).child(
+            2 => div().text_color(muted).child(
                 item.modified
                     .map(files_win::shell::local_time)
+                    .unwrap_or_default(),
+            ),
+            _ => div().text_color(muted).child(
+                item.origin
+                    .as_ref()
+                    .map(|o| o.display().to_string())
                     .unwrap_or_default(),
             ),
         }
@@ -300,6 +367,8 @@ impl Explorer {
             sizes: Default::default(),
             marked: Default::default(),
             anchor: None,
+            place: Place::Folder,
+            explorer: cx.weak_entity(),
         };
         // Ctrl/Shift+click is ours (Listing::marked), not the table's single row.
         let table =
@@ -326,7 +395,7 @@ impl Explorer {
             |this, input, ev: &InputEvent, window, cx| {
                 if let InputEvent::PressEnter { .. } = ev {
                     let typed = PathBuf::from(input.read(cx).value().trim());
-                    if typed.is_dir() {
+                    if typed.is_dir() || places::is_place(&typed) {
                         this.history.go(typed);
                         this.load(window, cx);
                     } else {
@@ -382,20 +451,26 @@ impl Explorer {
             .update(cx, |a, cx| a.set_value(shown, window, cx));
         self.status = tr!("Loading…", "Wczytywanie…").into();
         cx.notify();
-        let task = cx.background_spawn(async move { list_dir(&dir) });
+        let place = Place::of(&dir);
+        let task = cx.background_spawn(async move { list(&dir) });
         cx.spawn_in(window, async move |this, cx| {
             let listed = task.await;
             let _ = this.update(cx, |this, cx| {
                 match listed {
                     Ok(items) => {
                         this.status = tr!("{} items", "Elementów: {}", items.len()).into();
-                        let dirs = items.iter().filter(|i| i.is_dir).map(|i| i.path.clone());
+                        // Drives and Recycle Bin items: no folder-size scan.
+                        let dirs = items
+                            .iter()
+                            .filter(|i| i.is_dir && i.size.is_none())
+                            .map(|i| i.path.clone());
                         // Replacing the scan drops (cancels) the previous folder's one.
                         let scan = scan_sizes(dirs.collect());
                         let sizes = scan.results();
                         this.scan = Some(scan);
                         this.table.update(cx, |t, cx| {
                             t.delegate_mut().items = items;
+                            t.delegate_mut().place = place;
                             t.delegate_mut().sizes = sizes;
                             t.delegate_mut().marked.clear();
                             t.delegate_mut().anchor = None;
@@ -509,6 +584,11 @@ impl Explorer {
             return;
         }
         let report = self.report_done(tr!("Delete", "Usuwanie"));
+        if Place::of(self.history.current()) == Place::RecycleBin {
+            // Out of the bin is for good; the $I file goes with its content.
+            let paths = paths.iter().flat_map(|p| places::bin_files(p)).collect();
+            return files_win::fileop::delete(h, paths, true, report);
+        }
         files_win::fileop::delete(h, paths, permanent, report);
     }
 
@@ -517,6 +597,33 @@ impl Explorer {
     }
     fn delete_forever(&mut self, _: &DeleteForever, window: &mut Window, cx: &mut Context<Self>) {
         self.delete_selected(true, window, cx);
+    }
+
+    /// Recycle Bin: puts the selected items back where they were deleted from.
+    fn restore_sel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let failed: Vec<String> = self
+            .selected(cx)
+            .iter()
+            .filter_map(|p| places::restore(p).err().map(|e| e.to_string()))
+            .collect();
+        self.notice = match failed.first() {
+            None => tr!("Restored", "Przywrócono").into(),
+            Some(e) => tr!("Not restored: {e}", "Nie przywrócono: {e}").into(),
+        };
+        self.load(window, cx);
+    }
+
+    /// Windows' own "Empty Recycle Bin" (it asks first).
+    fn empty_bin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(h) = hwnd(window) else {
+            return;
+        };
+        let changed = self.changed.clone();
+        outside_dispatch(cx, move || {
+            if files_win::shell::empty_recycle_bin(h) {
+                changed.store(true, Ordering::SeqCst);
+            }
+        });
     }
 
     fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
@@ -656,6 +763,11 @@ impl Explorer {
     /// Tab title: the folder name, or the drive for a root.
     pub fn title(&self) -> String {
         let dir = self.history.current();
+        match Place::of(dir) {
+            Place::ThisPc => return tr!("This PC", "Ten komputer"),
+            Place::RecycleBin => return tr!("Recycle Bin", "Kosz"),
+            Place::Folder => {}
+        }
         dir.file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| dir.display().to_string())
@@ -750,6 +862,7 @@ impl Render for Explorer {
             .as_ref()
             .map(|p| p.lock().unwrap().progress.clone());
         let (can_back, can_forward) = (self.history.can_back(), self.history.can_forward());
+        let in_bin = Place::of(self.history.current()) == Place::RecycleBin;
 
         let toolbar = div()
             .h_flex()
@@ -815,6 +928,22 @@ impl Render for Explorer {
                         cx.listener(|this, _, w, cx| this.open_terminal(&OpenTerminal, w, cx)),
                     ),
             )
+            .when(in_bin, |bar| {
+                bar.child(
+                    Button::new("restore")
+                        .cursor_pointer()
+                        .outline()
+                        .label(tr!("Restore", "Przywróć"))
+                        .on_click(cx.listener(|this, _, w, cx| this.restore_sel(w, cx))),
+                )
+                .child(
+                    Button::new("empty-bin")
+                        .cursor_pointer()
+                        .outline()
+                        .label(tr!("Empty Recycle Bin", "Opróżnij kosz"))
+                        .on_click(cx.listener(|this, _, w, cx| this.empty_bin(w, cx))),
+                )
+            })
             .child(
                 Button::new("paste")
                     .cursor_pointer()

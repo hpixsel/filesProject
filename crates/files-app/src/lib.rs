@@ -12,6 +12,8 @@ pub struct Item {
     pub is_dir: bool,
     pub size: Option<u64>,
     pub modified: Option<SystemTime>,
+    /// Recycle Bin items: the folder they were deleted from.
+    pub origin: Option<PathBuf>,
 }
 
 /// Lists `dir`: folders first, then files, each by name ignoring case.
@@ -33,6 +35,7 @@ pub fn list_dir(dir: &Path) -> io::Result<Vec<Item>> {
                 is_dir,
                 size: (!is_dir).then_some(meta.len()),
                 modified: meta.modified().ok(),
+                origin: None,
             })
         })
         .collect();
@@ -86,14 +89,15 @@ impl History {
         true
     }
 
+    /// Up to the parent folder; from a drive root to This PC.
     pub fn up(&mut self) -> bool {
-        match self.current.parent() {
-            Some(p) => {
-                self.go(p.to_path_buf());
-                true
-            }
-            None => false,
-        }
+        let parent = match self.current.parent() {
+            _ if places::is_place(&self.current) => return false,
+            Some(p) => p.to_path_buf(),
+            None => PathBuf::from(places::THIS_PC),
+        };
+        self.go(parent);
+        true
     }
 
     pub fn can_back(&self) -> bool {
@@ -156,6 +160,11 @@ mod tests {
         h.go(PathBuf::from(r"C:\a\b")); // same place: no history entry
         assert!(h.back());
         assert_eq!(h.current(), Path::new(r"C:\a\b\c"));
+
+        let mut h = History::new(PathBuf::from(r"C:\"));
+        assert!(h.up(), "a drive root goes up to This PC");
+        assert_eq!(h.current(), Path::new(places::THIS_PC));
+        assert!(!h.up(), "This PC is the top");
     }
 
     #[test]
@@ -252,7 +261,9 @@ pub mod favourites {
 
 /// What the window remembers between runs, in
 /// `%APPDATA%\FilesProject\settings.txt` as `key=value` lines.
+pub mod places;
 pub mod replace_explorer;
+pub mod session;
 pub mod update;
 
 pub mod settings {
@@ -268,6 +279,8 @@ pub mod settings {
         pub density: usize,
         /// `None` follows the Windows display language.
         pub polish: Option<bool>,
+        /// Reopen the last tabs and panes at start.
+        pub restore_tabs: bool,
     }
 
     impl Default for Settings {
@@ -277,6 +290,7 @@ pub mod settings {
                 dark: true,
                 density: 0,
                 polish: None,
+                restore_tabs: true,
             }
         }
     }
@@ -301,6 +315,7 @@ pub mod settings {
                 "dark" => s.dark = value != "false",
                 "density" => s.density = value.parse::<usize>().unwrap_or(0).min(2),
                 "lang" => s.polish = Some(value == "pl"),
+                "restore_tabs" => s.restore_tabs = value != "false",
                 _ => {}
             }
         }
@@ -313,8 +328,8 @@ pub mod settings {
             None => "wallpaper".into(),
         };
         let mut text = format!(
-            "accent={accent}\r\ndark={}\r\ndensity={}\r\n",
-            s.dark, s.density
+            "accent={accent}\r\ndark={}\r\ndensity={}\r\nrestore_tabs={}\r\n",
+            s.dark, s.density, s.restore_tabs
         );
         if let Some(pl) = s.polish {
             text += if pl { "lang=pl\r\n" } else { "lang=en\r\n" };
@@ -346,6 +361,7 @@ pub mod settings {
                 dark: false,
                 density: 2,
                 polish: Some(true),
+                restore_tabs: false,
             };
             assert_eq!(parse(&to_text(&s)), s);
             let w = Settings {

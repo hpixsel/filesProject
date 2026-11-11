@@ -52,6 +52,8 @@ fn main() {
     if after_update {
         args.remove(0);
     }
+    // After an update the saved tabs already hold its folder.
+    let explicit = !args.is_empty() && !after_update;
     let start = args
         .into_iter()
         .next()
@@ -64,7 +66,11 @@ fn main() {
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(r"C:\"));
     // `files .` from a terminal: relative to where it was typed.
-    let start = std::path::absolute(&start).unwrap_or(start);
+    let start = if files_app::places::is_place(&start) {
+        start // `shell:MyComputerFolder` is not a path on a disk
+    } else {
+        std::path::absolute(&start).unwrap_or(start)
+    };
 
     // Already running: the folder opens as a tab there.
     if !after_update && files_win::instance::send(&start) {
@@ -74,7 +80,7 @@ fn main() {
     // since a network path can take seconds to answer.
     let (folders, incoming) = std::sync::mpsc::channel();
     let on_dir = move |dir: PathBuf| {
-        if dir.is_dir() {
+        if dir.is_dir() || files_app::places::is_place(&dir) {
             let _ = folders.send(dir);
         }
     };
@@ -118,7 +124,9 @@ fn main() {
                 ..Default::default()
             };
             gpui_kit::open_window(options, cx, move |window, cx| {
-                cx.new(|cx| workspace::Workspace::new(start, settings, incoming, window, cx))
+                cx.new(|cx| {
+                    workspace::Workspace::new(start, explicit, settings, incoming, window, cx)
+                })
             })
             .expect("open window");
         });
