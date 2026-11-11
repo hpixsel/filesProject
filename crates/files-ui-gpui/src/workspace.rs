@@ -353,7 +353,13 @@ impl Workspace {
             );
             // The share is secondary: muted, after the letter.
             side = side.child(match share {
-                Some(s) => row.child(div().truncate().text_color(muted).child(s.clone())),
+                Some(s) => row.child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(s.clone()),
+                ),
                 None => row,
             });
         }
