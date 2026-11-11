@@ -38,7 +38,8 @@ actions!(
         OpenSel,
         CopyPath,
         SelectAll,
-        OpenTerminal
+        OpenTerminal,
+        Rename
     ]
 );
 
@@ -137,6 +138,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-alt-c", CopyPath, Some(CONTEXT)),
         // Ctrl+` does not arrive on a Polish keyboard layout.
         KeyBinding::new("ctrl-alt-t", OpenTerminal, Some(CONTEXT)),
+        KeyBinding::new("f2", Rename, Some(CONTEXT)),
     ]);
 }
 
@@ -195,6 +197,32 @@ fn this_pc() -> Vec<Drive> {
         .collect();
     drives.sort_by_key(|d| d.network);
     drives
+}
+
+/// Why `name` cannot be a file name in Windows, or `None` when it can.
+fn bad_name(name: &str) -> Option<String> {
+    if name.is_empty() || name == "." || name == ".." {
+        return Some(tr!(
+            "The name cannot be empty.",
+            "Nazwa nie może być pusta."
+        ));
+    }
+    if let Some(c) = name
+        .chars()
+        .find(|c| r#"\/:*?"<>|"#.contains(*c) || c.is_control())
+    {
+        return Some(tr!(
+            "A name cannot contain {c}",
+            "Nazwa nie może zawierać {c}"
+        ));
+    }
+    if name.ends_with(['.', ' ']) {
+        return Some(tr!(
+            "A name cannot end with a dot or a space.",
+            "Nazwa nie może kończyć się kropką ani spacją."
+        ));
+    }
+    None
 }
 
 /// Icon file (in `assets/icons`) and hue for a file or folder, from its
@@ -268,6 +296,8 @@ pub struct Listing {
     place: Place,
     /// The view that owns this list, which emits `OpenInNewTab`.
     explorer: WeakEntity<Explorer>,
+    /// The row being renamed (F2) and its name field.
+    renaming: Option<(PathBuf, Entity<InputState>)>,
 }
 
 impl Listing {
@@ -413,11 +443,25 @@ impl TableDelegate for Listing {
         match col_ix {
             0 => {
                 let (icon, color) = item_icon(item, cx.theme().primary, muted);
-                div()
-                    .h_flex()
-                    .gap_2()
-                    .child(icon.text_color(color))
-                    .child(item.name.clone())
+                let cell = div().h_flex().gap_2().child(icon.text_color(color));
+                match &self.renaming {
+                    Some((path, input)) if *path == item.path => {
+                        let me = self.explorer.clone();
+                        cell.child(
+                            div()
+                                .flex_1()
+                                .on_key_down(move |e: &KeyDownEvent, window, cx| {
+                                    if e.keystroke.key == "escape" {
+                                        let _ = me
+                                            .update(cx, |this, cx| this.cancel_rename(window, cx));
+                                        cx.stop_propagation();
+                                    }
+                                })
+                                .child(Input::new(input).xsmall()),
+                        )
+                    }
+                    _ => cell.child(item.name.clone()),
+                }
             }
             1 => {
                 let size = match item.size {
@@ -486,6 +530,7 @@ impl Explorer {
             anchor: None,
             place: Place::Folder,
             explorer: cx.weak_entity(),
+            renaming: None,
         };
         // Ctrl/Shift+click is ours (Listing::marked), not the table's single row.
         let table =
@@ -615,6 +660,7 @@ impl Explorer {
                             t.delegate_mut().place = place;
                             t.delegate_mut().sizes = sizes;
                             t.delegate_mut().marked.clear();
+                            t.delegate_mut().renaming = None;
                             t.delegate_mut().anchor = None;
                             t.refresh(cx);
                         });
@@ -739,6 +785,93 @@ impl Explorer {
     }
     fn delete_forever(&mut self, _: &DeleteForever, window: &mut Window, cx: &mut Context<Self>) {
         self.delete_selected(true, window, cx);
+    }
+
+    /// F2: the name in its row becomes editable; Enter or clicking away
+    /// renames, Esc cancels.
+    fn rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
+        let [path] = &self.selected(cx)[..] else {
+            return; // one item at a time
+        };
+        if Place::of(self.history.current()) != Place::Folder {
+            return;
+        }
+        let path = path.clone();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
+        cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, window, cx| {
+            if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                this.commit_rename(window, cx);
+            }
+        })
+        .detach();
+        input.update(cx, |i, cx| {
+            i.focus(window, cx);
+            i.select_all(window, cx);
+        });
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().renaming = Some((path, input));
+            cx.notify();
+        });
+    }
+
+    /// Esc while renaming: the old name stays.
+    fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().renaming = None;
+            cx.notify();
+        });
+        self.focus.focus(window, cx);
+    }
+
+    /// Checks the new name, then renames off the UI thread (a network
+    /// share can be slow) and reloads the folder. A bad name keeps the row
+    /// editable and says why.
+    fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((path, input)) = self
+            .table
+            .update(cx, |t, _| t.delegate_mut().renaming.take())
+        else {
+            return; // Enter, then the blur it causes: renamed once
+        };
+        let new = input.read(cx).value().trim().to_string();
+        if let Some(why) = bad_name(&new) {
+            self.notice = why.into();
+            self.table.update(cx, |t, cx| {
+                t.delegate_mut().renaming = Some((path, input.clone()));
+                cx.notify();
+            });
+            input.update(cx, |i, cx| i.focus(window, cx));
+            return;
+        }
+        self.table.update(cx, |_, cx| cx.notify());
+        self.focus.focus(window, cx);
+        if path.file_name().is_some_and(|n| n.to_string_lossy() == new) {
+            return;
+        }
+        let (from, to) = (path.clone(), path.with_file_name(&new));
+        let task = cx.background_spawn(async move {
+            // Renaming to another case of the same name is allowed.
+            let same = from.to_string_lossy().to_lowercase() == to.to_string_lossy().to_lowercase();
+            if to.exists() && !same {
+                return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+            }
+            std::fs::rename(&from, &to)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let r = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.notice = match r {
+                    Ok(()) => tr!("Renamed to {new}", "Zmieniono nazwę na {new}").into(),
+                    Err(e) => tr!("Cannot rename: {e}", "Nie można zmienić nazwy: {e}").into(),
+                };
+                this.load(window, cx);
+            });
+        })
+        .detach();
     }
 
     /// This PC like Explorer's: drive tiles with a usage bar, local drives
@@ -1303,6 +1436,7 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::copy_path))
             .on_action(cx.listener(Self::open_terminal))
+            .on_action(cx.listener(Self::rename))
             // The mouse's side buttons.
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
@@ -1343,6 +1477,14 @@ impl Render for Explorer {
 #[cfg(test)]
 mod tests {
     use super::icon_kind;
+
+    #[test]
+    fn bad_names() {
+        assert!(super::bad_name("ok name.txt").is_none());
+        for bad in ["", "..", "a/b", r"a\b", "x:y", "what?", "trail.", "trail "] {
+            assert!(super::bad_name(bad).is_some(), "{bad:?}");
+        }
+    }
 
     #[test]
     fn icons_by_name() {
