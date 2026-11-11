@@ -7,6 +7,14 @@ Na razie tylko Windows i jeden użytkownik (autor). Repozytorium jest publiczne,
 
 Szczegółowa analiza, ryzyka i otwarte decyzje: `docs/designs/files_project.md` (brief) i `docs/designs/files_project_m0.md` (projekt M0).
 
+## Zacznij tutaj
+- `docs/HANDOFF.md` — stan obecny, następny krok, wyniki eksperymentów (czytaj jako pierwsze, aktualizuj na koniec każdego zadania).
+- `docs/ARCHITECTURE.md` — crate'y i zasady wątków.
+- `docs/ROADMAP.md` — kamienie milowe M0–M6.
+- `docs/testing-rdp.md` — ręczne testy `rdppaste`.
+- Zasada: `unsafe` i wywołania Windows (COM/OLE/Win32) tylko w crate `files-win`; pozostałe crate'y mają `unsafe_code = "forbid"`.
+- UI (od M1): GPUI + gpui-kit (decyzja autora); szczegóły w `docs/research/ui-toolkit-2026-11.md`.
+
 ## Twarde wymagania (priorytet nad wszystkim innym)
 - **Wklejanie z RDP:** Ctrl+C w Eksploratorze Windows na serwerze zdalnym, potem Ctrl+V w tym programie na komputerze lokalnym. Kierunek odwrotny (lokalny → serwer) jest na razie poza zakresem.
 - **Program nigdy nie zacina systemu ani UI:**
