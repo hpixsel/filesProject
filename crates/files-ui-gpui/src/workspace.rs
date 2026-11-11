@@ -73,6 +73,7 @@ impl Workspace {
     pub fn new(
         start: PathBuf,
         settings: Settings,
+        incoming: std::sync::mpsc::Receiver<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -89,6 +90,22 @@ impl Workspace {
                 }
             },
         )
+        .detach();
+        // `files <folder>` from another process: a new tab, window to the front.
+        cx.spawn_in(window, async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(200))
+                .await;
+            let alive = this.update_in(cx, |this, window, cx| {
+                for dir in incoming.try_iter() {
+                    this.open_tab(dir, window, cx);
+                    window.activate_window();
+                }
+            });
+            if alive.is_err() {
+                break;
+            }
+        })
         .detach();
         let this = Workspace {
             panes: vec![Pane {
