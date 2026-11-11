@@ -2,15 +2,14 @@
 //! each pane with its own tabs. Every tab is an `Explorer`.
 
 use crate::explorer::{self, Explorer, OpenInNewTab};
-use crate::i18n::{self, tr};
-use crate::theme;
+use crate::i18n::tr;
+use crate::{prefs, theme};
 use files_app::favourites;
 use files_app::places;
 use files_app::session;
-use files_app::settings::{self, Settings};
 use files_app::update;
 use gpui_kit::component::button::*;
-use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
+use gpui_kit::component::color_picker::{ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::*;
 use gpui_kit::*;
@@ -75,7 +74,6 @@ pub struct Workspace {
     favourites: Vec<PathBuf>,
     /// Drive roots, with the share for mapped network drives.
     drives: Vec<(PathBuf, Option<String>)>,
-    settings: Settings,
     picker: Entity<ColorPickerState>,
     /// Read by the window's drop target at drop time: the active tab's folder…
     drop_dir: Arc<Mutex<PathBuf>>,
@@ -83,6 +81,8 @@ pub struct Workspace {
     drop_sink: Arc<Mutex<Option<DropSink>>>,
     focus: FocusHandle,
     update: Arc<Mutex<Update>>,
+    /// Kept up to date, saved with the tabs on exit.
+    bounds: WindowBounds,
 }
 
 impl Workspace {
@@ -91,12 +91,11 @@ impl Workspace {
     pub fn new(
         start: PathBuf,
         explicit: bool,
-        settings: Settings,
         incoming: std::sync::mpsc::Receiver<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let saved = settings
+        let saved = prefs::get(cx)
             .restore_tabs
             .then(|| session::file().and_then(|f| session::load(&f)))
             .flatten();
@@ -122,24 +121,23 @@ impl Workspace {
                 0,
             ),
         };
+        cx.observe_window_bounds(window, |this: &mut Self, window, _| {
+            this.bounds = window.window_bounds();
+        })
+        .detach();
         // Saved on every exit, the updater's restart included.
         cx.on_app_quit(|this: &mut Self, cx| {
             this.save_session(cx);
             async {}
         })
         .detach();
-        let accent = theme::accent(&settings);
+        let accent = theme::accent(prefs::get(cx));
         let picker = cx.new(|cx| ColorPickerState::new(window, cx).default_value(accent));
-        cx.subscribe_in(
-            &picker,
-            window,
-            |this, _, e: &ColorPickerEvent, window, cx| {
-                if let ColorPickerEvent::Change(Some(c)) = e {
-                    this.settings.accent = Some((c.h * 360., c.s));
-                    this.change(window, cx);
-                }
-            },
-        )
+        cx.subscribe_in(&picker, window, |_, _, e: &ColorPickerEvent, _, cx| {
+            if let ColorPickerEvent::Change(Some(c)) = e {
+                prefs::set(cx, |s| s.accent = Some((c.h * 360., c.s)));
+            }
+        })
         .detach();
         // `files <folder>` from another process: a new tab, window to the front.
         cx.spawn_in(window, async move |this, cx| loop {
@@ -170,12 +168,12 @@ impl Workspace {
                 .map(|f| favourites::load(&f))
                 .unwrap_or_default(),
             drives: drives(),
-            settings,
             picker,
             drop_dir: Default::default(),
             drop_sink: Default::default(),
             focus: cx.focus_handle(),
             update: Default::default(),
+            bounds: window.window_bounds(),
         };
         // Only the installed copy updates itself; one quiet check per start.
         if update::is_installed() {
@@ -221,6 +219,20 @@ impl Workspace {
                 })
                 .collect(),
             active_pane: self.active_pane,
+            window: Some(match self.bounds {
+                WindowBounds::Windowed(b) => (b, false),
+                WindowBounds::Maximized(b) | WindowBounds::Fullscreen(b) => (b, true),
+            })
+            .map(|(b, max)| {
+                let (o, sz) = (b.origin, b.size);
+                (
+                    o.x.into(),
+                    o.y.into(),
+                    sz.width.into(),
+                    sz.height.into(),
+                    max,
+                )
+            }),
         };
         if let Some(f) = session::file() {
             if let Err(e) = session::save(&f, &s) {
@@ -401,22 +413,8 @@ impl Workspace {
         });
     }
 
-    /// Applies and saves `self.settings` after a title-bar change.
-    fn change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        i18n::set_polish(
-            self.settings
-                .polish
-                .unwrap_or_else(files_win::shell::ui_is_polish),
-        );
-        theme::apply(&self.settings, Some(window), cx);
-        if let Some(f) = settings::file() {
-            if let Err(e) = settings::save(&f, &self.settings) {
-                eprintln!("cannot save settings: {e}");
-            }
-        }
-        // Back to the file list, so its shortcuts (Ctrl+Alt+T, ...) work again.
-        self.focus_active(window, cx);
-        window.refresh();
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        crate::settings_page::open(self.picker.clone(), window, cx);
     }
 
     fn save_favourites(&self) {
@@ -687,17 +685,7 @@ impl Render for Workspace {
             .iter()
             .any(|p| p.as_path() == Path::new(&current));
 
-        let dark = self.settings.dark;
-        let density = [
-            tr!("Density: normal", "Gęstość: zwykła"),
-            tr!("Density: compact", "Gęstość: kompaktowa"),
-            tr!("Density: very compact", "Gęstość: bardzo kompaktowa"),
-        ][self.settings.density]
-            .clone();
-        let presets = theme::PRESETS
-            .iter()
-            .map(|h| hsla(h / 360., 0.85, 0.6, 1.))
-            .collect();
+        let dark = prefs::get(cx).dark;
         let title =
             TitleBar::new()
                 // gpui-kit already indents 12 px; the logo sits in it, no extra padding.
@@ -752,54 +740,19 @@ impl Render for Workspace {
                                 .icon(if dark { IconName::Sun } else { IconName::Moon })
                                 .tooltip(tr!("Light / dark", "Jasny / ciemny"))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.settings.dark = !this.settings.dark;
-                                    this.change(window, cx);
+                                    prefs::set(cx, |s| s.dark = !s.dark);
+                                    // Back to the file list, so its shortcuts work again.
+                                    this.focus_active(window, cx);
                                 })),
                         )
                         .child(
-                            ColorPicker::new(&self.picker)
-                                .icon(IconName::Palette)
-                                .featured_colors(presets)
-                                .anchor(Anchor::TopRight),
-                        )
-                        .child(
-                            Button::new("wallpaper")
+                            Button::new("settings")
                                 .cursor_pointer()
                                 .ghost()
-                                .icon(IconName::Frame)
-                                .tooltip(tr!(
-                                    "Accent from Windows (from the wallpaper when Windows picks it automatically)",
-                                    "Kolor z Windows (z tapety, gdy Windows dobiera go automatycznie)"
-                                ))
+                                .icon(IconName::Settings)
+                                .tooltip(tr!("Settings", "Ustawienia"))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.settings.accent = None;
-                                    let shown = theme::accent(&this.settings);
-                                    this.picker
-                                        .update(cx, |p, cx| p.set_value(shown, window, cx));
-                                    this.change(window, cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("density")
-                                .cursor_pointer()
-                                .ghost()
-                                .icon(IconName::ALargeSmall)
-                                .tooltip(density)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.settings.density = (this.settings.density + 1) % 3;
-                                    this.change(window, cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("lang")
-                                .cursor_pointer()
-                                .ghost()
-                                .icon(IconName::Globe)
-                                .label(if i18n::polish() { "PL" } else { "EN" })
-                                .tooltip(tr!("Language", "Język"))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.settings.polish = Some(!i18n::polish());
-                                    this.change(window, cx);
+                                    this.open_settings(window, cx)
                                 })),
                         ),
                 );

@@ -277,6 +277,8 @@ pub mod settings {
         pub dark: bool,
         /// 0 normal, 1 compact, 2 very compact.
         pub density: usize,
+        /// Base text size in px for each density; it also scales paddings.
+        pub fonts: [f32; 3],
         /// `None` follows the Windows display language.
         pub polish: Option<bool>,
         /// Reopen the last tabs and panes at start.
@@ -289,6 +291,7 @@ pub mod settings {
                 accent: Some((217., 0.85)),
                 dark: true,
                 density: 0,
+                fonts: [16., 14., 13.],
                 polish: None,
                 restore_tabs: true,
             }
@@ -316,6 +319,12 @@ pub mod settings {
                 "density" => s.density = value.parse::<usize>().unwrap_or(0).min(2),
                 "lang" => s.polish = Some(value == "pl"),
                 "restore_tabs" => s.restore_tabs = value != "false",
+                "fonts" => {
+                    let n: Vec<f32> = value.split(' ').filter_map(|v| v.parse().ok()).collect();
+                    if let [a, b, c] = n[..] {
+                        s.fonts = [a, b, c].map(|f| f.clamp(10., 24.));
+                    }
+                }
                 _ => {}
             }
         }
@@ -331,6 +340,8 @@ pub mod settings {
             "accent={accent}\r\ndark={}\r\ndensity={}\r\nrestore_tabs={}\r\n",
             s.dark, s.density, s.restore_tabs
         );
+        let [a, b, c] = s.fonts;
+        text += &format!("fonts={a} {b} {c}\r\n");
         if let Some(pl) = s.polish {
             text += if pl { "lang=pl\r\n" } else { "lang=en\r\n" };
         }
@@ -360,6 +371,7 @@ pub mod settings {
                 accent: Some((30.5, 0.4)),
                 dark: false,
                 density: 2,
+                fonts: [18., 12.5, 11.],
                 polish: Some(true),
                 restore_tabs: false,
             };

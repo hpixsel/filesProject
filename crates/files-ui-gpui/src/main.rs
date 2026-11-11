@@ -6,6 +6,8 @@
 mod assets;
 mod explorer;
 mod i18n;
+mod prefs;
+mod settings_page;
 mod theme;
 mod workspace;
 
@@ -140,13 +142,21 @@ fn main() {
             let settings = files_app::settings::file()
                 .map(|f| files_app::settings::load(&f))
                 .unwrap_or_default();
-            i18n::set_polish(
-                settings
-                    .polish
-                    .unwrap_or_else(files_win::shell::ui_is_polish),
-            );
-            theme::apply(&settings, None, cx);
+            prefs::init(settings, cx);
+            // Where and how big the window was when it was last closed.
+            let window_bounds = files_app::session::file()
+                .and_then(|f| files_app::session::load(&f))
+                .and_then(|s| s.window)
+                .map(|(x, y, w, h, max)| {
+                    let b = Bounds::new(point(px(x), px(y)), size(px(w), px(h)));
+                    if max {
+                        WindowBounds::Maximized(b)
+                    } else {
+                        WindowBounds::Windowed(b)
+                    }
+                });
             let options = WindowOptions {
+                window_bounds,
                 titlebar: Some(TitleBar::title_bar_options()),
                 // Mica gets DWM ready for a system backdrop; Workspace::new swaps it
                 // for acrylic (files_win::shell::set_acrylic).
@@ -154,9 +164,7 @@ fn main() {
                 ..Default::default()
             };
             gpui_kit::open_window(options, cx, move |window, cx| {
-                cx.new(|cx| {
-                    workspace::Workspace::new(start, explicit, settings, incoming, window, cx)
-                })
+                cx.new(|cx| workspace::Workspace::new(start, explicit, incoming, window, cx))
             })
             .expect("open window");
         });
