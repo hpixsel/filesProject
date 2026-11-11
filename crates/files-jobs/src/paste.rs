@@ -1,7 +1,9 @@
 //! The paste job: virtual files from the clipboard into a local folder.
 
 use crate::{start, JobCtx, JobError, JobHandle, Limits};
-use files_core::{check, ConflictPolicy, Entry, EntryKind, Progress, LARGE_FILE, READ_MAX};
+use files_core::{
+    check, numbered, ConflictPolicy, Entry, EntryKind, Progress, LARGE_FILE, READ_MAX,
+};
 use files_win::io::{
     background_mode, create_partial, free_bytes, rename_no_replace, set_delete_on_close,
     write_aligned, AlignedBuf,
@@ -15,6 +17,8 @@ use tracing::info;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Summary {
     pub files_written: u32,
+    /// Existing files left alone under `ConflictPolicy::Skip`.
+    pub files_skipped: u32,
     /// Folders that did not exist before, including implied parents.
     pub folders_created: u32,
     pub bytes: u64,
@@ -101,6 +105,14 @@ fn run(
         };
         ctx.check_cancel()?;
         progress.current = Some(e.rel_path.clone());
+        if policy == ConflictPolicy::Skip && e.rel_path.to_path_under(target).exists() {
+            progress.files_done += 1;
+            progress.bytes_done += size.unwrap_or(0); // keep the percentage honest
+            summary.files_skipped += 1;
+            ctx.report_done(progress.clone());
+            info!(file = %e.rel_path, "skipped, already exists");
+            continue;
+        }
         copy_one(
             ctx,
             &files,
@@ -126,6 +138,26 @@ fn run(
     }
     summary.bytes = progress.bytes_done;
     Ok(summary)
+}
+
+/// Renames to `path`, or to `name (2).ext`, `name (3).ext`… if taken. The
+/// no-replace rename itself decides, so a file appearing meanwhile is safe.
+fn rename_to_free_name(partial: &Path, path: &Path) -> files_win::Result<()> {
+    let mut last = None;
+    for n in 1..1000 {
+        let candidate = if n == 1 {
+            path.to_path_buf()
+        } else {
+            numbered(path, n)
+        };
+        match rename_no_replace(partial, &candidate) {
+            Err(files_win::Error::TargetExists(p)) => last = Some(p),
+            other => return other,
+        }
+    }
+    Err(files_win::Error::TargetExists(
+        last.unwrap_or_else(|| path.to_path_buf()),
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -187,8 +219,9 @@ fn copy_one(
     }
     set_delete_on_close(&file, false)?;
     let renamed = match policy {
-        ConflictPolicy::Fail => rename_no_replace(&partial, &path),
+        ConflictPolicy::Fail | ConflictPolicy::Skip => rename_no_replace(&partial, &path),
         ConflictPolicy::Overwrite => std::fs::rename(&partial, &path).map_err(Into::into),
+        ConflictPolicy::Rename => rename_to_free_name(&partial, &path),
     };
     if let Err(err) = renamed {
         set_delete_on_close(&file, true)?; // dropping `file` now deletes the .partial

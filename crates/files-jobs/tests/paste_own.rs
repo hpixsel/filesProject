@@ -1,6 +1,6 @@
 //! End-to-end paste tests with the fake data object passed directly.
 
-use files_core::ConflictPolicy::{self, Fail, Overwrite};
+use files_core::ConflictPolicy::{self, Fail, Overwrite, Rename, Skip};
 use files_core::Problem;
 use files_jobs::{paste_from, start, JobError, Limits, Outcome, Summary};
 use files_win::fake::{generated, DeclaredSize, FakeContent, FakeFile, FakeFiles};
@@ -115,6 +115,7 @@ fn nested_tree_with_interleaved_folders() {
         s,
         Summary {
             files_written: 3,
+            files_skipped: 0,
             folders_created: 3,
             bytes: 3 + 3 + 17
         }
@@ -452,4 +453,55 @@ fn five_gib_file() {
     }
     assert_eq!(pos, len);
     std::fs::remove_dir_all(d).unwrap();
+}
+
+#[test]
+fn skip_leaves_existing_files_and_pastes_the_rest() {
+    let d = tmp("skip");
+    std::fs::write(d.join("a"), "old a").unwrap();
+    let o = run(
+        &d,
+        Skip,
+        FakeFiles::new()
+            .file("a", bytes(b"new a"))
+            .file("b", bytes(b"new b")),
+    );
+    let Outcome::Done(s) = o else { panic!("{o:?}") };
+    assert_eq!((s.files_written, s.files_skipped), (1, 1));
+    assert_eq!(std::fs::read(d.join("a")).unwrap(), b"old a");
+    assert_eq!(std::fs::read(d.join("b")).unwrap(), b"new b");
+    assert!(no_partials(&d));
+}
+
+#[test]
+fn rename_keeps_both_with_numbered_names() {
+    let d = tmp("rename");
+    std::fs::write(d.join("r.txt"), "old").unwrap();
+    std::fs::write(d.join("r (2).txt"), "older copy").unwrap();
+    let o = run(
+        &d,
+        Rename,
+        FakeFiles::new()
+            .file("r.txt", bytes(b"new"))
+            .file("fresh.txt", bytes(b"f")),
+    );
+    assert!(
+        matches!(
+            o,
+            Outcome::Done(Summary {
+                files_written: 2,
+                ..
+            })
+        ),
+        "{o:?}"
+    );
+    assert_eq!(std::fs::read(d.join("r.txt")).unwrap(), b"old");
+    assert_eq!(std::fs::read(d.join("r (2).txt")).unwrap(), b"older copy");
+    assert_eq!(std::fs::read(d.join("r (3).txt")).unwrap(), b"new");
+    assert_eq!(
+        std::fs::read(d.join("fresh.txt")).unwrap(),
+        b"f",
+        "free names keep their name"
+    );
+    assert!(no_partials(&d));
 }

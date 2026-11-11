@@ -4,10 +4,29 @@ use crate::{Entry, EntryKind, RelPath, DISK_RESERVE};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+/// What to do when a pasted file already exists in the target folder.
+/// Only `Fail` reports such conflicts as problems; the others resolve them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictPolicy {
     Fail,
     Overwrite,
+    /// Leave the existing file and do not paste this one.
+    Skip,
+    /// Keep both: the pasted file gets a free `name (2).ext` name.
+    Rename,
+}
+
+/// `dir\stem (n).ext`, the name Explorer uses for "keep both".
+pub fn numbered(path: &Path, n: u32) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy())
+        .unwrap_or_default();
+    let name = match path.extension() {
+        Some(ext) => format!("{stem} ({n}).{}", ext.to_string_lossy()),
+        None => format!("{stem} ({n})"),
+    };
+    path.with_file_name(name)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,6 +142,40 @@ pub fn check(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numbered_names() {
+        let n = |p: &str| numbered(Path::new(p), 2).to_string_lossy().into_owned();
+        assert_eq!(n(r"D:\in\report.pdf"), r"D:\in\report (2).pdf");
+        assert_eq!(n(r"D:\in\Makefile"), r"D:\in\Makefile (2)");
+        assert_eq!(n(r"D:\in\.bashrc"), r"D:\in\.bashrc (2)");
+        assert_eq!(n(r"D:\in\a.tar.gz"), r"D:\in\a.tar (2).gz");
+    }
+
+    #[test]
+    fn only_fail_reports_existing_files() {
+        for policy in [
+            ConflictPolicy::Skip,
+            ConflictPolicy::Rename,
+            ConflictPolicy::Overwrite,
+        ] {
+            assert_eq!(
+                run(&[file("f", None)], policy, &[("f", false)], 100 * GB),
+                [],
+                "{policy:?}"
+            );
+        }
+        assert_eq!(
+            run(
+                &[file("f", None)],
+                ConflictPolicy::Fail,
+                &[("f", false)],
+                100 * GB
+            )
+            .len(),
+            1
+        );
+    }
 
     const GB: u64 = 1 << 30;
 

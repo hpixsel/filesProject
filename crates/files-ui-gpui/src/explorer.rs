@@ -139,6 +139,8 @@ pub struct Explorer {
     address: Entity<InputState>,
     status: SharedString,
     paste: Option<Arc<Mutex<Paste>>>,
+    /// Set when a paste stopped because files already exist; asks what to do.
+    conflict: Option<SharedString>,
     changed: Arc<AtomicBool>,
     accent: usize,
     focus: FocusHandle,
@@ -198,6 +200,7 @@ impl Explorer {
             address,
             status: SharedString::default(),
             paste: None,
+            conflict: None,
             changed,
             accent: 0,
             focus: cx.focus_handle(),
@@ -268,12 +271,19 @@ impl Explorer {
     }
 
     fn paste_here(&mut self, _: &PasteHere, _: &mut Window, cx: &mut Context<Self>) {
+        self.start(None, cx);
+    }
+
+    /// `flag` is the conflict choice (`--overwrite`, `--skip`, `--rename`),
+    /// or `None` for the first attempt, which stops if files already exist.
+    fn start(&mut self, flag: Option<&'static str>, cx: &mut Context<Self>) {
+        self.conflict = None;
         if self.paste.is_some() {
             self.status = "A paste is already running.".into();
             cx.notify();
             return;
         }
-        match start_paste(self.history.current()) {
+        match start_paste(self.history.current(), flag) {
             Ok(state) => {
                 self.paste = Some(state);
                 self.status = "Pasting…".into();
@@ -301,6 +311,11 @@ impl Explorer {
             self.paste = None;
             self.status = match code {
                 0 => message.into(),
+                // rdppaste exit code 5: files already exist, nothing written.
+                5 => {
+                    self.conflict = Some(message.clone().into());
+                    SharedString::default()
+                }
                 _ => format!("Paste ended ({code}): {message}").into(),
             };
             self.load(window, cx);
@@ -316,11 +331,12 @@ impl Explorer {
 
 /// Starts `rdppaste <dir> --machine` next to this executable and a thread
 /// that turns its stdout lines into shared state.
-fn start_paste(dir: &Path) -> std::io::Result<Arc<Mutex<Paste>>> {
+fn start_paste(dir: &Path, flag: Option<&str>) -> std::io::Result<Arc<Mutex<Paste>>> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let exe = std::env::current_exe()?.with_file_name("rdppaste.exe");
     let mut child = Command::new(exe)
         .arg(dir)
+        .args(flag)
         .arg("--machine")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -477,6 +493,32 @@ impl Render for Explorer {
                         .ghost()
                         .label("Cancel")
                         .on_click(cx.listener(|this, _, _, _| this.cancel_paste())),
+                );
+        }
+        if let Some(message) = self.conflict.clone() {
+            let choice = |id: &'static str, label: &'static str, flag: &'static str| {
+                Button::new(id)
+                    .label(label)
+                    .on_click(cx.listener(move |this, _, _, cx| this.start(Some(flag), cx)))
+            };
+            status = status
+                .child(
+                    div()
+                        .text_color(cx.theme().foreground)
+                        .child(format!("{message}. What should happen to them?")),
+                )
+                .child(choice("replace", "Replace", "--overwrite").primary())
+                .child(choice("skip", "Skip existing", "--skip").outline())
+                .child(choice("both", "Keep both", "--rename").outline())
+                .child(
+                    Button::new("dismiss")
+                        .ghost()
+                        .label("Cancel")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.conflict = None;
+                            this.status = "Paste cancelled; nothing was written.".into();
+                            cx.notify();
+                        })),
                 );
         }
 
