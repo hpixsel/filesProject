@@ -673,6 +673,8 @@ pub struct Explorer {
     drives: Vec<Drive>,
     /// A folder just made with Ctrl+Shift+N, renamed once the list shows it.
     pending_rename: Option<PathBuf>,
+    /// The address shows as clickable crumbs; this is true while it is typed in.
+    editing_address: bool,
     /// The hover preview on screen, and a counter that drops stale ones.
     preview: Option<Preview>,
     hover_gen: usize,
@@ -720,9 +722,15 @@ impl Explorer {
             &address,
             window,
             |this, input, ev: &InputEvent, window, cx| {
+                if let InputEvent::Blur = ev {
+                    this.editing_address = false;
+                    cx.notify();
+                }
                 if let InputEvent::PressEnter { .. } = ev {
                     let typed = PathBuf::from(input.read(cx).value().trim());
                     if typed.is_dir() || places::is_place(&typed) {
+                        this.editing_address = false;
+                        this.focus.focus(window, cx);
                         this.history.go(typed);
                         this.load(window, cx);
                     } else {
@@ -768,6 +776,7 @@ impl Explorer {
             shown_hidden: false,
             drives: Vec::new(),
             pending_rename: None,
+            editing_address: false,
             preview: None,
             hover_gen: 0,
             typed: (String::new(), std::time::Instant::now()),
@@ -1032,6 +1041,8 @@ impl Explorer {
     }
 
     fn focus_address(&mut self, _: &FocusAddress, window: &mut Window, cx: &mut Context<Self>) {
+        self.editing_address = true;
+        cx.notify();
         self.address.update(cx, |a, cx| {
             a.focus(window, cx);
             a.select_all(window, cx);
@@ -1221,6 +1232,104 @@ impl Explorer {
             });
         })
         .detach();
+    }
+
+    /// The path as clickable levels, like FilePilot: This PC › C: › Users ›
+    /// ... Click a level to go there, middle-click for a new tab, drop files
+    /// on it; click the empty space on the right to type a path.
+    fn crumbs(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = cx.theme();
+        let (muted, fg, hover, border, radius) = (
+            t.muted_foreground,
+            t.foreground,
+            t.table_hover,
+            t.input,
+            t.radius,
+        );
+        let mut levels: Vec<(String, PathBuf)> = Vec::new();
+        let here = self.history.current();
+        match Place::of(here) {
+            Place::ThisPc => levels.push((tr!("This PC", "Ten komputer"), here.into())),
+            Place::RecycleBin => levels.push((tr!("Recycle Bin", "Kosz"), here.into())),
+            Place::Folder => {
+                levels.push((tr!("This PC", "Ten komputer"), places::THIS_PC.into()));
+                let mut dirs: Vec<&Path> = here.ancestors().collect();
+                dirs.reverse();
+                for d in dirs {
+                    let name = match d.file_name() {
+                        Some(n) => n.to_string_lossy().into_owned(),
+                        // A drive (C:) or a share (\\server\share).
+                        None => d.display().to_string().trim_end_matches('\\').to_string(),
+                    };
+                    levels.push((name, d.to_path_buf()));
+                }
+            }
+        }
+        // A long path keeps its start and its last levels.
+        const KEEP: usize = 5;
+        let hidden = levels.len().saturating_sub(KEEP + 1);
+        let last = levels.len() - 1;
+        let mut bar = div()
+            .id("crumbs")
+            .flex_1()
+            .h_8()
+            .px_1()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_0p5()
+            .overflow_hidden()
+            .rounded(radius)
+            .border_1()
+            .border_color(border)
+            .cursor_text()
+            .on_click(
+                cx.listener(|this, _, window, cx| this.focus_address(&FocusAddress, window, cx)),
+            );
+        for (ix, (name, path)) in levels.into_iter().enumerate() {
+            if ix > 0 && ix <= hidden {
+                if ix == 1 {
+                    bar = bar.child(div().px_1().text_color(muted).child("…"));
+                }
+                continue;
+            }
+            if ix > 0 {
+                bar = bar.child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted));
+            }
+            let (go, tab, drop_to) = (path.clone(), path.clone(), path.clone());
+            bar = bar.child(
+                div()
+                    .id(("crumb", ix))
+                    .flex_shrink_0()
+                    .px_2()
+                    .py_0p5()
+                    .rounded(radius)
+                    .cursor_pointer()
+                    .text_color(if ix == last { fg } else { muted })
+                    .hover(move |s| s.bg(hover).text_color(fg))
+                    .tooltip({
+                        let full = path.display().to_string();
+                        move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(full.clone())
+                                .build(window, cx)
+                        }
+                    })
+                    .drag_over::<DraggedFiles>(move |s, _, _, _| s.bg(hover))
+                    .on_drop(move |d: &DraggedFiles, window, _| {
+                        drop_files(d, &drop_to, window, None)
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation(); // not the "type a path" click around it
+                        this.go_to(go.clone(), window, cx);
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |_, _, _, cx| cx.emit(OpenInNewTab(tab.clone()))),
+                    )
+                    .child(name),
+            );
+        }
+        bar
     }
 
     /// Esc while renaming: the old name stays.
@@ -1697,7 +1806,26 @@ impl Render for Explorer {
                     .tooltip(tr!("Refresh (F5)", "Odśwież (F5)"))
                     .on_click(cx.listener(|this, _, w, cx| this.refresh(&Refresh, w, cx))),
             )
-            .child(div().flex_1().child(Input::new(&self.address)))
+            .child(if self.editing_address {
+                let me = cx.weak_entity();
+                div()
+                    .flex_1()
+                    // Esc: back to the crumbs, the path unchanged.
+                    .on_key_down(move |e: &KeyDownEvent, window, cx| {
+                        if e.keystroke.key == "escape" {
+                            let _ = me.update(cx, |this, cx| {
+                                this.editing_address = false;
+                                this.focus.focus(window, cx);
+                                cx.notify();
+                            });
+                            cx.stop_propagation();
+                        }
+                    })
+                    .child(Input::new(&self.address))
+                    .into_any_element()
+            } else {
+                self.crumbs(cx).into_any_element()
+            })
             .child(
                 Button::new("copy-path")
                     .cursor_pointer()
