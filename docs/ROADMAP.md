@@ -49,4 +49,6 @@ Each milestone gets its own design document in `docs/designs/`.
 - [x] `files` on PATH (`files --install`)
 - [x] updates from GitHub releases (signed releases on `v*` tags; `files --install`; update button)
 - [x] replacing Windows Explorer (folders, drives, Win+E), with `--restore-explorer` and `restore-explorer.reg`
-- [ ] later, on a settings page: a toggle for the Explorer replacement
+- [x] This PC (drive tiles) and the Recycle Bin (restore, delete, empty), also taken over from Explorer
+- [x] middle click: open a folder in a new tab, close a tab; tabs remembered between runs
+- [ ] later, on a settings page: toggles for the Explorer replacement and remembered tabs, density steps
