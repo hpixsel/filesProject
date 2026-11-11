@@ -471,6 +471,61 @@ pub fn properties(window: isize, path: &Path) {
     };
 }
 
+/// Where a `.lnk` shortcut points, when that is a path on a disk (not a
+/// shell place or a URL). Reads the file through Windows' own shell link.
+pub fn link_target(link: &Path) -> Option<PathBuf> {
+    use windows::Win32::System::Com::{
+        CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ,
+    };
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+    let _sta = crate::Sta::new().ok()?;
+    let mut buf = vec![0u16; 32_768];
+    // SAFETY: COM on this thread's apartment; `buf` is the output buffer.
+    unsafe {
+        let sl: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+        sl.cast::<IPersistFile>()
+            .ok()?
+            .Load(&HSTRING::from(link.as_os_str()), STGM_READ)
+            .ok()?;
+        sl.GetPath(&mut buf, std::ptr::null_mut(), 0).ok()?;
+    }
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(0);
+    (end > 0).then(|| PathBuf::from(String::from_utf16_lossy(&buf[..end])))
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    #[test]
+    fn reads_a_shortcut_to_a_folder() {
+        use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER};
+        use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+        let dir = std::env::temp_dir().join(format!("files-lnk-{}", std::process::id()));
+        let target = dir.join("Zażółć target");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = dir.join("to target.lnk");
+        {
+            let _sta = crate::Sta::new().unwrap();
+            // SAFETY: COM on this thread; makes the shortcut file.
+            unsafe {
+                let sl: IShellLinkW =
+                    CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
+                sl.SetPath(&HSTRING::from(target.as_os_str())).unwrap();
+                sl.cast::<IPersistFile>()
+                    .unwrap()
+                    .Save(&HSTRING::from(link.as_os_str()), true)
+                    .unwrap();
+            }
+        }
+        // Temp may be an 8.3 path (KACPER~1); compare where both lead.
+        let got = link_target(&link).map(|p| p.canonicalize().unwrap());
+        assert_eq!(got, Some(target.canonicalize().unwrap()));
+        assert_eq!(link_target(&dir.join("missing.lnk")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 #[cfg(test)]
 mod menu_tests {
     use super::*;

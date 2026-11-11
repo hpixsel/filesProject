@@ -44,7 +44,8 @@ actions!(
         FocusAddress,
         NewFolder,
         ClearSelection,
-        Properties
+        Properties,
+        ToggleHidden
     ]
 );
 
@@ -152,6 +153,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-shift-n", NewFolder, Some(CONTEXT)),
         KeyBinding::new("escape", ClearSelection, Some(CONTEXT)),
         KeyBinding::new("alt-enter", Properties, Some(CONTEXT)),
+        KeyBinding::new("ctrl-h", ToggleHidden, Some(CONTEXT)),
     ]);
 }
 
@@ -168,13 +170,33 @@ pub fn hwnd(window: &Window) -> Option<isize> {
 /// re-enters GPUI while its state is borrowed and the app panics.
 /// The items at `dir`: a folder, or This PC (drives with free space), or
 /// the Recycle Bin. Runs off the UI thread; drives can be slow to answer.
-fn list(dir: &Path) -> std::io::Result<Vec<Item>> {
+fn list(dir: &Path, show_hidden: bool) -> std::io::Result<Vec<Item>> {
     let drives = files_win::shell::drives;
     Ok(match Place::of(dir) {
-        Place::Folder => return list_dir(dir),
+        Place::Folder => return list_dir(dir, show_hidden).map(with_links),
         Place::RecycleBin => places::recycle_bin(&drives()),
         Place::ThisPc => Vec::new(), // drive tiles instead, see `this_pc`
     })
+}
+
+/// `.lnk` shortcuts: their target, the name without `.lnk`, and a folder
+/// when the target is one (so it opens here, not in Explorer).
+fn with_links(mut items: Vec<Item>) -> Vec<Item> {
+    for i in items.iter_mut().filter(|i| is_lnk(&i.path)) {
+        if let Some(target) = files_win::shell::link_target(&i.path) {
+            i.is_dir = target.is_dir();
+            i.link = Some(target);
+            if let Some(stem) = i.path.file_stem() {
+                i.name = stem.to_string_lossy().into_owned();
+            }
+        }
+    }
+    items
+}
+
+fn is_lnk(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("lnk"))
 }
 
 /// A drive tile in This PC.
@@ -281,6 +303,14 @@ fn icon_kind(name: &str, is_dir: bool) -> Option<(&'static str, Option<f32>)> {
 /// The table's icon for `item` and its colour.
 fn item_icon(item: &Item, accent: Hsla, muted: Hsla) -> (Icon, Hsla) {
     let plain = if item.is_dir { accent } else { muted };
+    if item.link.is_some() {
+        let name = if item.is_dir {
+            "folder-symlink"
+        } else {
+            "file-symlink"
+        };
+        return (Icon::empty().path(format!("icons/{name}.svg")), plain);
+    }
     match icon_kind(&item.name, item.is_dir) {
         Some((name, hue)) => (
             Icon::empty().path(format!("icons/{name}.svg")),
@@ -422,7 +452,8 @@ impl TableDelegate for Listing {
         // A folder row takes dropped files.
         let row = match self.items.get(row_ix).filter(|i| i.is_dir) {
             Some(dir) => {
-                let (dest, list) = (dir.path.clone(), self.changed.clone());
+                let dest = dir.link.clone().unwrap_or_else(|| dir.path.clone());
+                let list = self.changed.clone();
                 let over = cx.theme().drag_border.opacity(0.25);
                 row.drag_over::<DraggedFiles>(move |s, _, _, _| s.bg(over))
                     .on_drop(move |d: &DraggedFiles, window, cx| {
@@ -437,7 +468,7 @@ impl TableDelegate for Listing {
             .items
             .get(row_ix)
             .filter(|i| i.is_dir)
-            .map(|i| i.path.clone());
+            .map(|i| i.link.clone().unwrap_or_else(|| i.path.clone()));
         row.on_mouse_down(MouseButton::Middle, move |_, _, cx| {
             if let Some(dir) = middle.clone() {
                 let _ = explorer.update(cx, |_, cx| cx.emit(OpenInNewTab(dir)));
@@ -540,6 +571,7 @@ impl TableDelegate for Listing {
             }
             1 => {
                 let size = match item.size {
+                    _ if item.is_dir && item.link.is_some() => String::new(),
                     Some(n) => format_size(n),
                     None => match self.sizes.lock().unwrap().get(&item.path) {
                         Some(&n) => format_size(n),
@@ -589,6 +621,8 @@ pub struct Explorer {
     thread_notice: Arc<Mutex<Option<String>>>,
     /// Language the column headers were built in.
     polish: bool,
+    /// Whether this listing shows hidden files; reloads when the setting changes.
+    shown_hidden: bool,
     /// This PC's drive tiles.
     drives: Vec<Drive>,
     /// A folder just made with Ctrl+Shift+N, renamed once the list shows it.
@@ -681,6 +715,7 @@ impl Explorer {
             changed,
             thread_notice: Default::default(),
             polish: i18n::polish(),
+            shown_hidden: false,
             drives: Vec::new(),
             pending_rename: None,
             typed: (String::new(), std::time::Instant::now()),
@@ -722,7 +757,9 @@ impl Explorer {
             .detach();
             return;
         }
-        let task = cx.background_spawn(async move { list(&dir) });
+        self.shown_hidden = crate::prefs::get(cx).show_hidden;
+        let show_hidden = self.shown_hidden;
+        let task = cx.background_spawn(async move { list(&dir, show_hidden) });
         cx.spawn_in(window, async move |this, cx| {
             let listed = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
@@ -732,7 +769,7 @@ impl Explorer {
                         // Drives and Recycle Bin items: no folder-size scan.
                         let dirs = items
                             .iter()
-                            .filter(|i| i.is_dir && i.size.is_none())
+                            .filter(|i| i.is_dir && i.size.is_none() && i.link.is_none())
                             .map(|i| i.path.clone());
                         // Replacing the scan drops (cancels) the previous folder's one.
                         let scan = scan_sizes(dirs.collect());
@@ -776,7 +813,7 @@ impl Explorer {
             return;
         };
         if item.is_dir {
-            self.history.go(item.path);
+            self.history.go(item.link.unwrap_or(item.path));
             self.load(window, cx);
         } else if let Some(h) = hwnd(window) {
             outside_dispatch(cx, move || {
@@ -892,8 +929,13 @@ impl Explorer {
             return;
         }
         let path = path.clone();
-        let name = path
-            .file_name()
+        // A shortcut's name is edited without `.lnk`, which stays.
+        let shown = if is_lnk(&path) {
+            path.file_stem()
+        } else {
+            path.file_name()
+        };
+        let name = shown
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
@@ -1066,6 +1108,11 @@ impl Explorer {
         }
         self.table.update(cx, |_, cx| cx.notify());
         self.focus.focus(window, cx);
+        let new = if is_lnk(&path) {
+            format!("{new}.lnk")
+        } else {
+            new
+        };
         if path.file_name().is_some_and(|n| n.to_string_lossy() == new) {
             return;
         }
@@ -1448,10 +1495,13 @@ fn start_paste(dir: &Path, flag: Option<&str>) -> std::io::Result<Arc<Mutex<Past
 }
 
 impl Render for Explorer {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.polish != i18n::polish() {
             self.polish = i18n::polish();
             self.table.update(cx, |t, cx| t.refresh(cx)); // column headers
+        }
+        if self.shown_hidden != crate::prefs::get(cx).show_hidden {
+            self.load(window, cx); // hidden files turned on or off
         }
         let muted = cx.theme().muted_foreground;
         let progress = self
@@ -1658,6 +1708,9 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::new_folder))
             .on_action(cx.listener(Self::clear_selection))
             .on_action(cx.listener(Self::properties))
+            .on_action(cx.listener(|_, _: &ToggleHidden, _, cx| {
+                crate::prefs::set(cx, |s| s.show_hidden = !s.show_hidden)
+            }))
             .on_key_down(cx.listener(Self::type_to_select))
             // The mouse's side buttons.
             .on_mouse_down(

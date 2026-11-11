@@ -56,6 +56,7 @@ pub fn recycle_bin(roots: &[PathBuf]) -> Vec<Item> {
                 size: Some(size),
                 modified: Some(deleted),
                 origin: original.parent().map(Path::to_path_buf),
+                link: None,
                 path: content,
             })
         })
