@@ -189,8 +189,7 @@ session reads.
     full path. Clicking the empty space (or Ctrl+L / Alt+D / F4) shows the
     path to type; Enter goes, Esc or clicking away returns. Long paths hide
     levels after "This PC" once the names pass about 90 characters.
-13. **Dev build, not released yet (owner: no release for now; CI is slow,
-    see below). Branch `sidebar-groups`, on top of `grid-view`:**
+13. **v0.7.0 (2026-11-11, PR #20, tested by hand by the owner):**
     *   **Thumbnail grid** (Ctrl+Shift+G): tiles with thumbnails; arrows move
         by tile and by row (context `Grid`), Shift+click ranges.
     *   **Sidebar groups** (`files_app::favourites`, `[Name]` sections and
@@ -220,8 +219,10 @@ session reads.
         pause, the API has none).
     *   **CI** now runs on pull requests and main only (it ran twice per
         change, and Windows runners queue).
-14. **Next:** the owner tests the list above; merge `breadcrumbs`, then
-    `grid-view` / `sidebar-groups`; release when the owner says.
+14. **Also in v0.7.0:** the "Paste from RDP" button is gone; Ctrl+V pastes
+    both kinds (real paths through Windows, virtual files through rdppaste).
+15. **Next:** the owner tries v0.7.0 at work (RDP pastes on real servers);
+    then the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1).
 
 ## Open questions
 
