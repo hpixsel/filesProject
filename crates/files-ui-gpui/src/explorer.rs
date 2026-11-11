@@ -52,7 +52,8 @@ actions!(
         GridLeft,
         GridRight,
         GridUp,
-        GridDown
+        GridDown,
+        TogglePane
     ]
 );
 
@@ -174,6 +175,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("right", GridRight, Some("Grid")),
         KeyBinding::new("up", GridUp, Some("Grid")),
         KeyBinding::new("down", GridDown, Some("Grid")),
+        KeyBinding::new("alt-p", TogglePane, Some(CONTEXT)),
     ]);
 }
 
@@ -303,6 +305,26 @@ fn type_of(item: &Item) -> String {
                 .unwrap_or_default()
         })
         .clone()
+}
+
+/// The preview pane's content for one item.
+struct PaneContent {
+    path: PathBuf,
+    picture: Option<Arc<RenderImage>>,
+    /// The start of a text file.
+    text: Option<String>,
+}
+
+/// The first 8 KB of a text file, or `None` when it looks binary.
+fn text_start(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut buf = vec![0u8; 8192];
+    let n = std::fs::File::open(path).ok()?.read(&mut buf).ok()?;
+    buf.truncate(n);
+    if buf.contains(&0) {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// A drive tile in This PC.
@@ -814,6 +836,9 @@ pub struct Explorer {
     last_reload: std::time::Instant,
     /// The thumbnail view (large pictures) instead of the list.
     grid: bool,
+    /// The preview pane (Alt+P) and what it shows.
+    pane_open: bool,
+    pane: Option<PaneContent>,
     grid_scroll: ScrollHandle,
     /// The grid's width in px, measured as it paints.
     grid_width: std::rc::Rc<std::cell::Cell<f32>>,
@@ -945,6 +970,8 @@ impl Explorer {
             dirty: Default::default(),
             last_reload: std::time::Instant::now(),
             grid: false,
+            pane_open: false,
+            pane: None,
             grid_scroll: ScrollHandle::new(),
             grid_width: Default::default(),
             thumbs: Default::default(),
@@ -1997,6 +2024,141 @@ impl Explorer {
             })
     }
 
+    /// The preview pane: the selected item's picture (or the start of a
+    /// text file) and its details. Loads in the background when the
+    /// selection changes.
+    fn side_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let selected = self.selected(cx);
+        let item = match &selected[..] {
+            [one] => self
+                .table
+                .read(cx)
+                .delegate()
+                .items
+                .iter()
+                .find(|i| &i.path == one)
+                .cloned(),
+            _ => None,
+        };
+        if let Some(item) = &item {
+            if self.pane.as_ref().is_none_or(|p| p.path != item.path) {
+                self.pane = Some(PaneContent {
+                    path: item.path.clone(),
+                    picture: None,
+                    text: None,
+                });
+                let (path, is_dir) = (item.path.clone(), item.is_dir);
+                let task = cx.background_spawn(async move {
+                    let picture = (!is_dir)
+                        .then(|| shell_picture(&path, 512, true))
+                        .flatten()
+                        .or_else(|| shell_picture(&path, 256, false));
+                    let text = if is_dir { None } else { text_start(&path) };
+                    (path, picture, text)
+                });
+                cx.spawn_in(window, async move |this, cx| {
+                    let (path, picture, text) = task.await;
+                    let _ = this.update(cx, |this, cx| {
+                        if let Some(p) = this.pane.as_mut().filter(|p| p.path == path) {
+                            p.picture = picture;
+                            p.text = text;
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
+        let t = cx.theme();
+        let (muted, border, mono) = (t.muted_foreground, t.border, t.mono_font_family.clone());
+        let pane = div()
+            .id("preview-pane")
+            .w(px(300.))
+            .h_full()
+            .flex_shrink_0()
+            .border_l_1()
+            .border_color(border)
+            .p_3()
+            .v_flex()
+            .gap_2()
+            .overflow_y_scroll();
+        let Some(item) = item else {
+            let hint = match selected.len() {
+                0 => tr!(
+                    "Select a file to preview it.",
+                    "Zaznacz plik, żeby zobaczyć podgląd."
+                ),
+                n => tr!("{n} items selected", "Zaznaczono: {n}"),
+            };
+            return div().child(pane.text_color(muted).child(hint));
+        };
+        let content = self.pane.as_ref().filter(|p| p.path == item.path);
+        let picture = content.and_then(|p| p.picture.clone());
+        let text = content
+            .and_then(|p| p.text.clone())
+            .filter(|_| picture.is_none() || !item.is_dir);
+        let size = item
+            .size
+            .or_else(|| {
+                self.table
+                    .read(cx)
+                    .delegate()
+                    .sizes
+                    .lock()
+                    .unwrap()
+                    .get(&item.path)
+                    .copied()
+            })
+            .map(format_size);
+        let row = |label: String, value: String| {
+            div()
+                .v_flex()
+                .child(div().text_xs().text_color(muted).child(label))
+                .child(div().text_sm().child(value))
+        };
+        div().child(
+            pane.children(picture.map(|p| {
+                div().flex().justify_center().child(
+                    img(ImageSource::Render(p))
+                        .max_w(px(270.))
+                        .max_h(px(270.))
+                        .object_fit(ObjectFit::Contain),
+                )
+            }))
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(item.name.clone()),
+            )
+            .child(row(tr!("Type", "Typ"), type_of(&item)))
+            .children(size.map(|s| row(tr!("Size", "Rozmiar"), s)))
+            .children(item.modified.map(|m| {
+                row(
+                    tr!("Modified", "Zmodyfikowano"),
+                    files_win::shell::local_time(m),
+                )
+            }))
+            .child(row(
+                tr!("Location", "Lokalizacja"),
+                item.path
+                    .parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default(),
+            ))
+            .children(text.map(|t| {
+                div()
+                    .mt_2()
+                    .p_2()
+                    .rounded(cx.theme().radius)
+                    .bg(cx.theme().muted)
+                    .font_family(mono)
+                    .text_xs()
+                    .whitespace_normal()
+                    .child(t)
+            })),
+        )
+    }
+
     /// Esc while renaming: the old name stays.
     fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.table.update(cx, |t, cx| {
@@ -2534,6 +2696,18 @@ impl Render for Explorer {
                     .on_click(cx.listener(|this, _, w, cx| this.copy_path(&CopyPath, w, cx))),
             )
             .child(
+                Button::new("pane")
+                    .cursor_pointer()
+                    .ghost()
+                    .selected(self.pane_open)
+                    .icon(IconName::PanelRightOpen)
+                    .tooltip(tr!("Preview pane (Alt+P)", "Panel podglądu (Alt+P)"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.pane_open = !this.pane_open;
+                        cx.notify();
+                    })),
+            )
+            .child(
                 Button::new("grid")
                     .cursor_pointer()
                     .ghost()
@@ -2689,6 +2863,10 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::properties))
             .on_action(cx.listener(Self::toggle_grid))
             .on_action(cx.listener(Self::search))
+            .on_action(cx.listener(|this, _: &TogglePane, _, cx| {
+                this.pane_open = !this.pane_open;
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &GridLeft, _, cx| this.grid_move(-1, cx)))
             .on_action(cx.listener(|this, _: &GridRight, _, cx| this.grid_move(1, cx)))
             .on_action(cx.listener(|this, _: &GridUp, _, cx| {
@@ -2746,15 +2924,24 @@ impl Render for Explorer {
                         let here = this.history.current().to_path_buf();
                         drop_files(d, &here, window, Some(this.changed.clone()))
                     }))
-                    .child(if Place::of(self.history.current()) == Place::ThisPc {
-                        self.this_pc_view(cx).into_any_element()
-                    } else if self.grid {
-                        self.grid_view(cx).into_any_element()
-                    } else {
-                        DataTable::new(&self.table)
-                            .with_size(theme::table_size())
-                            .into_any_element()
-                    }),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .size_full()
+                            .child(div().flex_1().min_w_0().h_full().child(
+                                if Place::of(self.history.current()) == Place::ThisPc {
+                                    self.this_pc_view(cx).into_any_element()
+                                } else if self.grid {
+                                    self.grid_view(cx).into_any_element()
+                                } else {
+                                    DataTable::new(&self.table)
+                                        .with_size(theme::table_size())
+                                        .into_any_element()
+                                },
+                            ))
+                            .children(self.pane_open.then(|| self.side_pane(window, cx))),
+                    ),
             )
             .child(div().pt_2().child(status))
             .children(self.preview.as_ref().map(|p| {
