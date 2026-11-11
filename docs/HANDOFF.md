@@ -189,8 +189,39 @@ session reads.
     full path. Clicking the empty space (or Ctrl+L / Alt+D / F4) shows the
     path to type; Enter goes, Esc or clicking away returns. Long paths hide
     levels after "This PC" once the names pass about 90 characters.
-13. **Next:** the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1), dragging
-    files out to other apps if wanted, then whatever the owner asks for next.
+13. **Dev build, not released yet (owner: no release for now; CI is slow,
+    see below). Branch `sidebar-groups`, on top of `grid-view`:**
+    *   **Thumbnail grid** (Ctrl+Shift+G): tiles with thumbnails; arrows move
+        by tile and by row (context `Grid`), Shift+click ranges.
+    *   **Sidebar groups** (`files_app::favourites`, `[Name]` sections and
+        `[*drives]` in favourites.txt): drag items and whole groups, empty
+        groups take drops, new / rename / remove groups (gpui-kit context
+        menu), folders dropped on a group join it.
+    *   **Folder watching** (`files_win::watch`, FindFirstChangeNotification):
+        reload at most once a second, keeping the selection and a rename in
+        progress; not while search results are shown.
+    *   **Search** (Ctrl+F): filters as you type; Enter walks subfolders in
+        the background (5,000 results at most) with a Location column.
+    *   **History menu:** right-click Back / Forward.
+    *   **Columns:** Type (`shell::type_name`, cached per extension), chosen
+        in settings (`columns`), dragged widths kept (`widths`).
+    *   **Preview pane** (Alt+P): picture or the start of a text file, and
+        details.
+    *   **Command palette** (Ctrl+Shift+P, `src/palette.rs`): commands and
+        recent / favourite folders; letters in order, Polish marks optional.
+    *   **Bulk rename** (F2 on several items, `files_app::bulk`): `#` number,
+        `{name}`; all or nothing, through temporary names, undone on failure.
+    *   **Drag out:** a GPUI drag that reaches the window edge becomes
+        Windows' own drag (`files_win::drag`, DoDragDrop; GPUI's Windows
+        platform has no external drag).
+    *   **Operations bar** (`src/ops.rs`): copies, moves and deletes in
+        progress with a bar and Cancel (`fileop::OpProgress`, an
+        `IFileOperationProgressSink`; cancel stops before the next item; no
+        pause, the API has none).
+    *   **CI** now runs on pull requests and main only (it ran twice per
+        change, and Windows runners queue).
+14. **Next:** the owner tests the list above; merge `breadcrumbs`, then
+    `grid-view` / `sidebar-groups`; release when the owner says.
 
 ## Open questions
 

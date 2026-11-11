@@ -57,8 +57,12 @@ Each milestone gets its own design document in `docs/designs/`.
 
 - [x] resizable panes; drag a tab to move it or split
 - [x] drag files onto folders, panes and the sidebar (inside the window)
-- [ ] drag files out to Explorer and other apps
+- [x] drag files out to Explorer and other apps
 - [x] F2 / context-menu rename in the row; folder background menu
 - [x] sorting, type to jump, Explorer's keys, new folder
 - [x] hidden files setting; `.lnk`/`.url` shortcuts; Windows icons; hover preview
 - [x] address bar as clickable levels (crumbs), click the empty space to type
+- [x] thumbnail grid view; preview pane; command palette
+- [x] sidebar groups with drag and drop
+- [x] folder watching; search (filter and subfolders); history menu
+- [x] Type column, column choice and widths; bulk rename; operations bar

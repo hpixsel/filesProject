@@ -113,6 +113,7 @@ pub fn drop_files(
     dest: &Path,
     window: &Window,
     dest_list: Option<Arc<AtomicBool>>,
+    cx: &mut App,
 ) {
     // Not into itself, its own subfolder, or the folder it is already in.
     let paths: Vec<PathBuf> = d
@@ -135,7 +136,20 @@ pub fn drop_files(
     let m = window.modifiers();
     let mv = !m.control && (m.shift || drive(first) == drive(dest));
     let source = d.changed.clone();
-    files_win::fileop::transfer(h, paths, dest.to_path_buf(), mv, move |r| {
+    let label = match (mv, paths.len()) {
+        (true, n) => tr!(
+            "Moving {n} items to {}",
+            "Przenoszenie ({n}) do {}",
+            place_name(dest)
+        ),
+        (false, n) => tr!(
+            "Copying {n} items to {}",
+            "Kopiowanie ({n}) do {}",
+            place_name(dest)
+        ),
+    };
+    let progress = crate::ops::start(label, cx);
+    files_win::fileop::transfer(h, paths, dest.to_path_buf(), mv, progress, move |r| {
         if let Err(e) = r {
             eprintln!("drop: {e}");
         }
@@ -787,7 +801,7 @@ impl TableDelegate for Listing {
                 let over = cx.theme().drag_border.opacity(0.25);
                 row.drag_over::<DraggedFiles>(move |s, _, _, _| s.bg(over))
                     .on_drop(move |d: &DraggedFiles, window, cx| {
-                        drop_files(d, &dest, window, Some(list.clone()));
+                        drop_files(d, &dest, window, Some(list.clone()), cx);
                         cx.stop_propagation(); // not into the folder around it too
                     })
             }
@@ -1320,7 +1334,11 @@ impl Explorer {
         let Some(h) = hwnd(window) else { return };
         let dir = self.history.current().to_path_buf();
         let report = self.report_done(tr!("Paste", "Wklejanie"));
-        files_win::fileop::paste_paths(h, dir, report);
+        let progress = crate::ops::start(
+            tr!("Pasting into {}", "Wklejanie do {}", place_name(&dir)),
+            cx,
+        );
+        files_win::fileop::paste_paths(h, dir, progress, report);
     }
 
     /// The selected items: the marked rows, or the table's current row.
@@ -1373,12 +1391,14 @@ impl Explorer {
             return;
         }
         let report = self.report_done(tr!("Delete", "Usuwanie"));
+        let label = tr!("Deleting {} items", "Usuwanie ({})", paths.len());
+        let progress = crate::ops::start(label, cx);
         if Place::of(self.history.current()) == Place::RecycleBin {
             // Out of the bin is for good; the $I file goes with its content.
             let paths = paths.iter().flat_map(|p| places::bin_files(p)).collect();
-            return files_win::fileop::delete(h, paths, true, report);
+            return files_win::fileop::delete(h, paths, true, progress, report);
         }
-        files_win::fileop::delete(h, paths, permanent, report);
+        files_win::fileop::delete(h, paths, permanent, progress, report);
     }
 
     fn delete_sel(&mut self, _: &DeleteSel, window: &mut Window, cx: &mut Context<Self>) {
@@ -1964,8 +1984,8 @@ impl Explorer {
                         }
                     })
                     .drag_over::<DraggedFiles>(move |s, _, _, _| s.bg(hover))
-                    .on_drop(move |d: &DraggedFiles, window, _| {
-                        drop_files(d, &drop_to, window, None)
+                    .on_drop(move |d: &DraggedFiles, window, cx| {
+                        drop_files(d, &drop_to, window, None, cx)
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
                         cx.stop_propagation(); // not the "type a path" click around it
@@ -3104,9 +3124,9 @@ impl Render for Explorer {
                     }))
                     // Files dropped on the list (not on a folder row) land here.
                     .drag_over::<DraggedFiles>(move |s, _, _, _| s.border_color(drop_border))
-                    .on_drop(cx.listener(|this, d: &DraggedFiles, window, _| {
+                    .on_drop(cx.listener(|this, d: &DraggedFiles, window, cx| {
                         let here = this.history.current().to_path_buf();
-                        drop_files(d, &here, window, Some(this.changed.clone()))
+                        drop_files(d, &here, window, Some(this.changed.clone()), cx)
                     }))
                     .child(
                         div()

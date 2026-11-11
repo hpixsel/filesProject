@@ -165,6 +165,9 @@ impl Workspace {
                     this.open_tab(dir, window, cx);
                     window.activate_window();
                 }
+                if crate::ops::tidy(cx) {
+                    cx.notify(); // progress bars move
+                }
                 let update = this.update.lock().unwrap().clone();
                 match update {
                     Update::Restart => cx.quit(),
@@ -651,8 +654,8 @@ impl Workspace {
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover))
                 .drag_over::<DraggedFiles>(move |s, _, _, _| s.bg(hover))
-                .on_drop(move |d: &DraggedFiles, window, _| {
-                    explorer::drop_files(d, &drop_dest, window, None)
+                .on_drop(move |d: &DraggedFiles, window, cx| {
+                    explorer::drop_files(d, &drop_dest, window, None, cx)
                 })
                 .child(icon.text_color(icon_color))
                 .child(div().truncate().child(label))
@@ -1247,6 +1250,8 @@ impl Render for Workspace {
                     .child(self.sidebar(cx))
                     .child(panes),
             )
+            // Copies, moves and deletes in progress, across all tabs.
+            .children(crate::ops::bar(cx))
     }
 }
 
