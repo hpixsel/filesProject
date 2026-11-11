@@ -117,8 +117,18 @@ session reads.
         moves the new ones in, and restarts with `--after-update`.
     *   **To release:** bump `version` in `crates/files-ui-gpui/Cargo.toml`
         (and `rdppaste`), merge, tag `vX.Y.Z`, push the tag.
-7.  **Next in M6:** replacing Explorer with `--restore-explorer`. Later, a
-    settings page with adjustable density steps.
+7.  **UI polish (PR #14):** app icon (`assets/app.ico` from
+    `assets/make_icon.py`, resource 1 via `embed-resource`), the logo in
+    the title bar, file-type icons (Lucide SVGs in `assets/icons`, served by
+    `src/assets.rs` before gpui-kit's), mouse back/forward.
+8.  **M6 Explorer replacement (design: `docs/designs/replace_explorer.md`):**
+    `files --replace-explorer` backs up and sets `Directory`, `Drive` and the
+    Win+E verb in HKCU through `reg.exe`; `files --restore-explorer` (or
+    double-clicking `restore-explorer.reg`) undoes it. Needs the installed
+    copy. Shipped in v0.3.0; owner test pending.
+9.  **Next:** a settings page (density steps, Explorer toggle), the
+    remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1), network drives on the
+    home network.
 
 ## Open questions
 

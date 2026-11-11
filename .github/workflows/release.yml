@@ -34,9 +34,9 @@ jobs:
           MINISIGN_KEY: ${{ secrets.MINISIGN_KEY }}
         run: |
           New-Item -ItemType Directory dist | Out-Null
-          Copy-Item target/release/files.exe, target/release/rdppaste.exe dist/
+          Copy-Item target/release/files.exe, target/release/rdppaste.exe, restore-explorer.reg dist/
           Set-Location dist
-          Get-ChildItem *.exe | ForEach-Object {
+          Get-ChildItem *.exe, *.reg | ForEach-Object {
             "{0}  {1}" -f (Get-FileHash $_ -Algorithm SHA256).Hash.ToLower(), $_.Name
           } | Set-Content -Encoding ascii SHA256SUMS.txt
           $key = Join-Path $env:RUNNER_TEMP minisign.key

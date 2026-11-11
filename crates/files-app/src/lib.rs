@@ -252,6 +252,7 @@ pub mod favourites {
 
 /// What the window remembers between runs, in
 /// `%APPDATA%\FilesProject\settings.txt` as `key=value` lines.
+pub mod replace_explorer;
 pub mod update;
 
 pub mod settings {

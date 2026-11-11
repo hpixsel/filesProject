@@ -48,4 +48,5 @@ Each milestone gets its own design document in `docs/designs/`.
 - [x] CLI integration: open terminal here (Ctrl+Alt+T), `files <folder>` opens a tab in the running window
 - [x] `files` on PATH (`files --install`)
 - [x] updates from GitHub releases (signed releases on `v*` tags; `files --install`; update button)
-- [ ] replacing Windows Explorer, with `--restore-explorer`
+- [x] replacing Windows Explorer (folders, drives, Win+E), with `--restore-explorer` and `restore-explorer.reg`
+- [ ] later, on a settings page: a toggle for the Explorer replacement
