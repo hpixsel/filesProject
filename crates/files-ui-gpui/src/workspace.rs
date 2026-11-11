@@ -125,12 +125,19 @@ impl Workspace {
             this.bounds = window.window_bounds();
         })
         .detach();
-        // Saved on every exit, the updater's restart included.
+        // Tabs and window are saved when the window closes (its X button,
+        // Alt+F4, the taskbar) and when the app quits (the updater restart);
+        // closing the window does not quit the app.
         cx.on_app_quit(|this: &mut Self, cx| {
             this.save_session(cx);
             async {}
         })
         .detach();
+        let me = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_, cx| {
+            let _ = me.update(cx, |this, cx| this.save_session(cx));
+            true
+        });
         let accent = theme::accent(prefs::get(cx));
         let picker = cx.new(|cx| ColorPickerState::new(window, cx).default_value(accent));
         cx.subscribe_in(&picker, window, |_, _, e: &ColorPickerEvent, _, cx| {
@@ -688,6 +695,10 @@ impl Render for Workspace {
         let dark = prefs::get(cx).dark;
         let title =
             TitleBar::new()
+                .on_close_window(cx.listener(|this, _, window, cx| {
+                    this.save_session(cx);
+                    window.remove_window();
+                }))
                 // gpui-kit already indents 12 px; the logo sits in it, no extra padding.
                 .child(
                     div()
