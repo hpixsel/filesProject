@@ -28,8 +28,8 @@ Each milestone gets its own design document in `docs/designs/`.
 
 ## M3: daily use
 
-- [ ] tabs, multiple panes, favourites
-- [ ] copy path without quotes
+- [x] tabs (Ctrl+T/W, Ctrl+Tab), two panes (F6, Ctrl+F6), favourites sidebar (Ctrl+D) with drives
+- [x] copy path without quotes (toolbar button, Ctrl+Alt+C; Ctrl+Shift+C is often taken globally, e.g. by ShareX)
 
 ## M4: appearance
 

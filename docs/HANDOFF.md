@@ -55,9 +55,18 @@ session reads.
 
 ## Next step
 
-1.  Done: multiple selection (Ctrl+click, Shift+click, Ctrl+A) for copy, cut, delete and the
-    context menu. Today these work on one item at a time.
-2.  M3: tabs, multiple panes, favourites, and "copy path" without quotes.
+1.  **Done:**
+    *   multiple selection (Ctrl+click, Shift+click, Ctrl+A);
+    *   M3: a `Workspace` view with tabs, two panes, a sidebar of
+        favourites and drives, and copy path (Ctrl+Alt+C or the toolbar
+        button).
+2.  **Layout lesson:** gpui-kit's `h_flex` centres children vertically.
+    Use `flex().flex_row()` for rows that must stretch, plus `min_w_0` and
+    `overflow_hidden` on panes.
+3.  **Next, M4:**
+    *   themes: wallpaper-based, and any accent colour (today: 5 presets);
+    *   density: normal, compact, very compact;
+    *   Polish and English UI.
 
 ## Open questions
 
