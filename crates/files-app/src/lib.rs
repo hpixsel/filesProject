@@ -249,3 +249,114 @@ pub mod favourites {
         }
     }
 }
+
+/// What the window remembers between runs, in
+/// `%APPDATA%\FilesProject\settings.txt` as `key=value` lines.
+pub mod settings {
+    use std::path::{Path, PathBuf};
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Settings {
+        /// (hue in degrees, saturation 0–1), or `None` to follow the
+        /// Windows accent colour, which Windows can take from the wallpaper.
+        pub accent: Option<(f32, f32)>,
+        pub dark: bool,
+        /// 0 normal, 1 compact, 2 very compact.
+        pub density: usize,
+        /// `None` follows the Windows display language.
+        pub polish: Option<bool>,
+    }
+
+    impl Default for Settings {
+        fn default() -> Self {
+            Settings {
+                accent: Some((217., 0.85)),
+                dark: true,
+                density: 0,
+                polish: None,
+            }
+        }
+    }
+
+    pub fn file() -> Option<PathBuf> {
+        super::favourites::file().map(|f| f.with_file_name("settings.txt"))
+    }
+
+    /// Unknown keys and bad values keep their defaults.
+    pub fn parse(text: &str) -> Settings {
+        let mut s = Settings::default();
+        for (key, value) in text.lines().filter_map(|l| l.split_once('=')) {
+            let value = value.trim();
+            match key.trim() {
+                "accent" if value == "wallpaper" => s.accent = None,
+                "accent" => {
+                    let mut n = value.split(' ').filter_map(|v| v.parse::<f32>().ok());
+                    if let (Some(h), Some(sat)) = (n.next(), n.next()) {
+                        s.accent = Some((h.rem_euclid(360.), sat.clamp(0., 1.)));
+                    }
+                }
+                "dark" => s.dark = value != "false",
+                "density" => s.density = value.parse::<usize>().unwrap_or(0).min(2),
+                "lang" => s.polish = Some(value == "pl"),
+                _ => {}
+            }
+        }
+        s
+    }
+
+    pub fn to_text(s: &Settings) -> String {
+        let accent = match s.accent {
+            Some((h, sat)) => format!("{h} {sat}"),
+            None => "wallpaper".into(),
+        };
+        let mut text = format!(
+            "accent={accent}\r\ndark={}\r\ndensity={}\r\n",
+            s.dark, s.density
+        );
+        if let Some(pl) = s.polish {
+            text += if pl { "lang=pl\r\n" } else { "lang=en\r\n" };
+        }
+        text
+    }
+
+    pub fn load(file: &Path) -> Settings {
+        std::fs::read_to_string(file)
+            .map(|t| parse(&t))
+            .unwrap_or_default()
+    }
+
+    pub fn save(file: &Path, s: &Settings) -> std::io::Result<()> {
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(file, to_text(s))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn round_trip_and_bad_values() {
+            let s = Settings {
+                accent: Some((30.5, 0.4)),
+                dark: false,
+                density: 2,
+                polish: Some(true),
+            };
+            assert_eq!(parse(&to_text(&s)), s);
+            let w = Settings {
+                accent: None,
+                ..Settings::default()
+            };
+            assert_eq!(parse(&to_text(&w)), w);
+            assert_eq!(
+                parse("density=9\naccent=x\njunk"),
+                Settings {
+                    density: 2,
+                    ..Settings::default()
+                }
+            );
+        }
+    }
+}

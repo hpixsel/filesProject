@@ -2,9 +2,12 @@
 //! each pane with its own tabs. Every tab is an `Explorer`.
 
 use crate::explorer::{self, Explorer};
+use crate::i18n::{self, tr};
 use crate::theme;
 use files_app::favourites;
+use files_app::settings::{self, Settings};
 use gpui_kit::component::button::*;
+use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::*;
 use gpui_kit::*;
@@ -56,7 +59,8 @@ pub struct Workspace {
     active_pane: usize,
     favourites: Vec<PathBuf>,
     drives: Vec<PathBuf>,
-    accent: usize,
+    settings: Settings,
+    picker: Entity<ColorPickerState>,
     /// Read by the window's drop target at drop time: the active tab's folder…
     drop_dir: Arc<Mutex<PathBuf>>,
     /// …and where that drop's outcome goes (the active tab).
@@ -65,8 +69,26 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    pub fn new(start: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        start: PathBuf,
+        settings: Settings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let first = cx.new(|cx| Explorer::new(start, window, cx));
+        let accent = theme::accent(&settings);
+        let picker = cx.new(|cx| ColorPickerState::new(window, cx).default_value(accent));
+        cx.subscribe_in(
+            &picker,
+            window,
+            |this, _, e: &ColorPickerEvent, window, cx| {
+                if let ColorPickerEvent::Change(Some(c)) = e {
+                    this.settings.accent = Some((c.h * 360., c.s));
+                    this.change(window, cx);
+                }
+            },
+        )
+        .detach();
         let this = Workspace {
             panes: vec![Pane {
                 tabs: vec![first],
@@ -77,7 +99,8 @@ impl Workspace {
                 .map(|f| favourites::load(&f))
                 .unwrap_or_default(),
             drives: files_win::shell::drives(),
-            accent: 0,
+            settings,
+            picker,
             drop_dir: Default::default(),
             drop_sink: Default::default(),
             focus: cx.focus_handle(),
@@ -192,6 +215,22 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Applies and saves `self.settings` after a title-bar change.
+    fn change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        i18n::set_polish(
+            self.settings
+                .polish
+                .unwrap_or_else(files_win::shell::ui_is_polish),
+        );
+        theme::apply(&self.settings, Some(window), cx);
+        if let Some(f) = settings::file() {
+            if let Err(e) = settings::save(&f, &self.settings) {
+                eprintln!("cannot save settings: {e}");
+            }
+        }
+        window.refresh();
+    }
+
     fn save_favourites(&self) {
         if let Some(f) = favourites::file() {
             if let Err(e) = favourites::save(&f, &self.favourites) {
@@ -207,7 +246,7 @@ impl Workspace {
 
     fn sidebar(&self, cx: &mut Context<Self>) -> Div {
         let muted = cx.theme().muted_foreground;
-        let heading = |text: &'static str| {
+        let heading = |text: String| {
             div()
                 .px_2()
                 .pt_3()
@@ -249,15 +288,12 @@ impl Workspace {
             .w(px(200.))
             .flex_shrink_0()
             .px_2()
-            .child(heading("Favourites"));
+            .child(heading(tr!("Favourites", "Ulubione")));
         if self.favourites.is_empty() {
-            side = side.child(
-                div()
-                    .px_2()
-                    .text_sm()
-                    .text_color(muted)
-                    .child("Ctrl+D adds the current folder"),
-            );
+            side = side.child(div().px_2().text_sm().text_color(muted).child(tr!(
+                "Ctrl+D adds the current folder",
+                "Ctrl+D dodaje bieżący folder"
+            )));
         }
         for (i, p) in self.favourites.iter().enumerate() {
             let name = p
@@ -272,7 +308,7 @@ impl Workspace {
                 cx,
             ));
         }
-        side = side.child(heading("Drives"));
+        side = side.child(heading(tr!("Drives", "Dyski")));
         for (i, d) in self.drives.iter().enumerate() {
             side = side.child(entry(
                 format!("drive-{i}").into(),
@@ -361,8 +397,17 @@ impl Render for Workspace {
             .iter()
             .any(|p| p.as_path() == Path::new(&current));
 
-        let dark = cx.theme().mode.is_dark();
-        let hue = theme::ACCENTS[self.accent].1;
+        let dark = self.settings.dark;
+        let density = [
+            tr!("Density: normal", "Gęstość: zwykła"),
+            tr!("Density: compact", "Gęstość: kompaktowa"),
+            tr!("Density: very compact", "Gęstość: bardzo kompaktowa"),
+        ][self.settings.density]
+            .clone();
+        let presets = theme::PRESETS
+            .iter()
+            .map(|h| hsla(h / 360., 0.85, 0.6, 1.))
+            .collect();
         let title =
             TitleBar::new()
                 .child(div().pl_2().child("FilesProject"))
@@ -380,7 +425,7 @@ impl Render for Workspace {
                                 } else {
                                     IconName::Star
                                 })
-                                .tooltip("Favourite (Ctrl+D)")
+                                .tooltip(tr!("Favourite (Ctrl+D)", "Ulubiony (Ctrl+D)"))
                                 .on_click(cx.listener(|this, _, w, cx| {
                                     this.toggle_favourite(&ToggleFavourite, w, cx)
                                 })),
@@ -390,7 +435,7 @@ impl Render for Workspace {
                                 .cursor_pointer()
                                 .ghost()
                                 .icon(IconName::PanelRight)
-                                .tooltip("Split panes (F6)")
+                                .tooltip(tr!("Split panes (F6)", "Podziel panele (F6)"))
                                 .on_click(cx.listener(|this, _, w, cx| {
                                     this.toggle_split(&ToggleSplit, w, cx)
                                 })),
@@ -400,28 +445,56 @@ impl Render for Workspace {
                                 .cursor_pointer()
                                 .ghost()
                                 .icon(if dark { IconName::Sun } else { IconName::Moon })
-                                .tooltip("Light / dark")
-                                .on_click(move |_, window, cx| {
-                                    let mode = if dark {
-                                        ThemeMode::Light
-                                    } else {
-                                        ThemeMode::Dark
-                                    };
-                                    Theme::change(mode, Some(window), cx);
-                                    files_win::shell::set_menu_dark(!dark);
-                                    theme::apply(hue, cx); // change() resets the colours
-                                }),
+                                .tooltip(tr!("Light / dark", "Jasny / ciemny"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.settings.dark = !this.settings.dark;
+                                    this.change(window, cx);
+                                })),
                         )
                         .child(
-                            Button::new("accent")
+                            ColorPicker::new(&self.picker)
+                                .icon(IconName::Palette)
+                                .featured_colors(presets)
+                                .anchor(Anchor::TopRight),
+                        )
+                        .child(
+                            Button::new("wallpaper")
                                 .cursor_pointer()
                                 .ghost()
-                                .icon(IconName::Palette)
-                                .tooltip("Accent colour")
+                                .icon(IconName::Frame)
+                                .tooltip(tr!(
+                                    "Accent from Windows (from the wallpaper when Windows picks it automatically)",
+                                    "Kolor z Windows (z tapety, gdy Windows dobiera go automatycznie)"
+                                ))
                                 .on_click(cx.listener(|this, _, window, cx| {
-                                    this.accent = (this.accent + 1) % theme::ACCENTS.len();
-                                    theme::apply(theme::ACCENTS[this.accent].1, cx);
-                                    window.refresh();
+                                    this.settings.accent = None;
+                                    let shown = theme::accent(&this.settings);
+                                    this.picker
+                                        .update(cx, |p, cx| p.set_value(shown, window, cx));
+                                    this.change(window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("density")
+                                .cursor_pointer()
+                                .ghost()
+                                .icon(IconName::ALargeSmall)
+                                .tooltip(density)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.settings.density = (this.settings.density + 1) % 3;
+                                    this.change(window, cx);
+                                })),
+                        )
+                        .child(
+                            Button::new("lang")
+                                .cursor_pointer()
+                                .ghost()
+                                .icon(IconName::Globe)
+                                .label(if i18n::polish() { "PL" } else { "EN" })
+                                .tooltip(tr!("Language", "Język"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.settings.polish = Some(!i18n::polish());
+                                    this.change(window, cx);
                                 })),
                         ),
                 );

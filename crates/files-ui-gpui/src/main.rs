@@ -1,8 +1,9 @@
-//! FilesProject window (M1): one pane, navigation, Explorer context menu and
+//! FilesProject window: tabs and panes of folders, Explorer context menu and
 //! Ctrl+V paste from an RDP session through a child `rdppaste --machine`.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod explorer;
+mod i18n;
 mod theme;
 mod workspace;
 
@@ -24,16 +25,22 @@ fn main() {
             gpui_kit::init(cx);
             explorer::bind_keys(cx);
             workspace::bind_keys(cx);
-            Theme::change(ThemeMode::Dark, None, cx);
-            files_win::shell::set_menu_dark(true);
-            theme::apply(theme::ACCENTS[0].1, cx);
+            let settings = files_app::settings::file()
+                .map(|f| files_app::settings::load(&f))
+                .unwrap_or_default();
+            i18n::set_polish(
+                settings
+                    .polish
+                    .unwrap_or_else(files_win::shell::ui_is_polish),
+            );
+            theme::apply(&settings, None, cx);
             let options = WindowOptions {
                 titlebar: Some(TitleBar::title_bar_options()),
                 window_background: WindowBackgroundAppearance::Blurred,
                 ..Default::default()
             };
-            gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| workspace::Workspace::new(start, window, cx))
+            gpui_kit::open_window(options, cx, move |window, cx| {
+                cx.new(|cx| workspace::Workspace::new(start, settings, window, cx))
             })
             .expect("open window");
         });

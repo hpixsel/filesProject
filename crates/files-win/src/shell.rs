@@ -224,3 +224,31 @@ pub fn drives() -> Vec<PathBuf> {
         .map(|i| PathBuf::from(format!("{}:\\", (b'A' + i) as char)))
         .collect()
 }
+
+/// The Windows accent colour as `0xRRGGBB`. With "Accent colour:
+/// Automatic", Windows picks it from the wallpaper.
+pub fn accent_colour() -> Option<u32> {
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+    let (mut abgr, mut len) = (0u32, 4u32);
+    // SAFETY: a 4-byte buffer for a REG_DWORD, its size in `len`.
+    unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            windows::core::w!(r"Software\Microsoft\Windows\DWM"),
+            windows::core::w!("AccentColor"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut abgr as *mut u32 as *mut _),
+            Some(&mut len),
+        )
+    }
+    .ok()
+    .ok()?;
+    Some(abgr.swap_bytes() >> 8)
+}
+
+/// True when Windows shows its own UI in Polish.
+pub fn ui_is_polish() -> bool {
+    // SAFETY: no arguments. The low 10 bits are the primary language.
+    unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() & 0x3ff == 0x15 }
+}

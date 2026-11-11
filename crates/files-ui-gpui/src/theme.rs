@@ -1,25 +1,53 @@
 //! One accent hue drives every panel colour (CLAUDE.md: "kolor przewodni").
 
+use files_app::settings::Settings;
 use gpui_kit::component::*;
 use gpui_kit::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// (name, hue in degrees)
-pub const ACCENTS: [(&str, f32); 5] = [
-    ("Blue", 217.),
-    ("Violet", 262.),
-    ("Green", 152.),
-    ("Orange", 25.),
-    ("Pink", 330.),
-];
+/// Quick picks in the colour picker, as hues in degrees (saturation 0.85).
+pub const PRESETS: [f32; 5] = [217., 262., 152., 25., 330.];
 
-/// Derives the whole palette from `hue` for the current mode. Only the
-/// window background is translucent, so the blurred backdrop shows through
-/// without alphas stacking up.
-pub fn apply(hue: f32, cx: &mut App) {
-    let h = hue / 360.;
+/// Normal, compact, very compact: (base font size, which also scales every
+/// rem-based padding, and file row height).
+const DENSITY: [(f32, f32); 3] = [(16., 32.), (14., 26.), (13., 22.)];
+
+static ROWS: AtomicUsize = AtomicUsize::new(0);
+
+/// File row height for the density last applied.
+pub fn row_height() -> Pixels {
+    px(DENSITY[ROWS.load(Ordering::Relaxed)].1)
+}
+
+/// The accent the settings ask for. "Wallpaper" is the Windows accent colour,
+/// read now (shortcut: read on start and on click, not when the wallpaper
+/// changes; listen for WM_SETTINGCHANGE if that matters).
+pub fn accent(s: &Settings) -> Hsla {
+    let preset = hsla(PRESETS[0] / 360., 0.85, 0.6, 1.);
+    match s.accent {
+        Some((h, sat)) => hsla(h / 360., sat, 0.6, 1.),
+        None => files_win::shell::accent_colour()
+            .map(|c| rgb(c).into())
+            .unwrap_or(preset),
+    }
+}
+
+/// Applies the mode, the density, and a palette derived from the accent's
+/// hue and saturation. Only the window background is translucent, so the
+/// blurred backdrop shows through without alphas stacking up.
+pub fn apply(s: &Settings, window: Option<&mut Window>, cx: &mut App) {
+    let mode = if s.dark {
+        ThemeMode::Dark
+    } else {
+        ThemeMode::Light
+    };
+    Theme::change(mode, window, cx); // resets the colours set below
+    files_win::shell::set_menu_dark(s.dark);
+    let accent = accent(s);
+    // Presets have saturation 0.85, so for them the values below stay as tuned.
+    let (h, k, dark) = (accent.h, accent.s / 0.85, s.dark);
     let theme = Theme::global_mut(cx);
-    let dark = theme.mode.is_dark();
-    let c = |s: f32, l: f32, a: f32| hsla(h, s, l, a);
+    let c = |sat: f32, l: f32, a: f32| hsla(h, (sat * k).min(1.), l, a);
     let l = |d: f32, li: f32| if dark { d } else { li };
     let t = &mut theme.colors;
 
@@ -70,4 +98,6 @@ pub fn apply(hue: f32, cx: &mut App) {
     theme.radius_lg = px(12.);
     theme.shadow = true;
     theme.font_family = "Segoe UI Variable Text".into();
+    theme.font_size = px(DENSITY[s.density].0);
+    ROWS.store(s.density, Ordering::Relaxed);
 }
