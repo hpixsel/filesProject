@@ -9,6 +9,9 @@ pub struct Session {
     /// Each pane's tabs (folders) and its active tab.
     pub panes: Vec<(Vec<PathBuf>, usize)>,
     pub active_pane: usize,
+    /// The window's restore position and size (x, y, width, height in
+    /// logical px) and whether it was maximized.
+    pub window: Option<(f32, f32, f32, f32, bool)>,
 }
 
 pub fn file() -> Option<PathBuf> {
@@ -17,6 +20,9 @@ pub fn file() -> Option<PathBuf> {
 
 pub fn to_text(s: &Session) -> String {
     let mut text = format!("active {}\r\n", s.active_pane);
+    if let Some((x, y, w, h, max)) = s.window {
+        text += &format!("window {x} {y} {w} {h} {}\r\n", u8::from(max));
+    }
     for (tabs, active) in &s.panes {
         text += &format!("pane {active}\r\n");
         for t in tabs {
@@ -33,6 +39,12 @@ pub fn parse(text: &str) -> Option<Session> {
     for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
         if let Some(n) = line.strip_prefix("active ") {
             s.active_pane = n.parse().unwrap_or(0);
+        } else if let Some(v) = line.strip_prefix("window ") {
+            let n: Vec<f32> = v.split(' ').filter_map(|p| p.parse().ok()).collect();
+            // Too small to use: forget it and let Windows choose.
+            if let [x, y, w, h, max] = n[..] {
+                s.window = (w >= 200. && h >= 150.).then_some((x, y, w, h, max != 0.));
+            }
         } else if let Some(n) = line.strip_prefix("pane ") {
             s.panes.push((Vec::new(), n.parse().unwrap_or(0)));
         } else if let Some((tabs, _)) = s.panes.last_mut() {
@@ -71,12 +83,16 @@ mod tests {
                 (vec![crate::places::RECYCLE_BIN.into()], 0),
             ],
             active_pane: 1,
+            window: Some((-1200., 40.5, 1400., 900., true)),
         };
         assert_eq!(parse(&to_text(&s)), Some(s));
+        let tiny = parse("window 0 0 10 10 0\npane 0\nC:\\\n").unwrap();
+        assert_eq!(tiny.window, None);
         assert_eq!(parse(""), None);
         let clamped = Session {
             panes: vec![(vec![r"C:\x".into()], 0)],
             active_pane: 0,
+            window: None,
         };
         assert_eq!(parse("active 3\npane 9\nC:\\x\n"), Some(clamped));
     }

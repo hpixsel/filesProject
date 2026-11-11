@@ -9,16 +9,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// Quick picks in the colour picker, as hues in degrees (saturation 0.85).
 pub const PRESETS: [f32; 5] = [217., 262., 152., 25., 330.];
 
-/// Normal, compact, very compact: (base font size, which also scales every
-/// rem-based padding, and the file table's size). The table's own sizes keep
-/// text and cell padding matched to the row; `Size::Size` drops both.
-const DENSITY: [(f32, Size); 3] = [(16., Size::Medium), (14., Size::Small), (13., Size::XSmall)];
+/// The file table's size for normal, compact, very compact. The base font
+/// size (settings `fonts`) scales text and rem paddings; the table's own
+/// sizes keep cell text and padding matched to the row (`Size::Size` drops
+/// both).
+const TABLE: [Size; 3] = [Size::Medium, Size::Small, Size::XSmall];
 
 static ROWS: AtomicUsize = AtomicUsize::new(0);
 
 /// File table size for the density last applied.
 pub fn table_size() -> Size {
-    DENSITY[ROWS.load(Ordering::Relaxed)].1
+    TABLE[ROWS.load(Ordering::Relaxed)]
 }
 
 /// The accent the settings ask for. "Wallpaper" is the Windows accent colour,
@@ -37,13 +38,13 @@ pub fn accent(s: &Settings) -> Hsla {
 /// Applies the mode, the density, and a palette derived from the accent's
 /// hue and saturation. Only the window background is translucent, so the
 /// blurred backdrop shows through without alphas stacking up.
-pub fn apply(s: &Settings, window: Option<&mut Window>, cx: &mut App) {
+pub fn apply(s: &Settings, cx: &mut App) {
     let mode = if s.dark {
         ThemeMode::Dark
     } else {
         ThemeMode::Light
     };
-    Theme::change(mode, window, cx); // resets the colours set below
+    Theme::change(mode, None, cx); // resets the colours set below
     files_win::shell::set_menu_dark(s.dark);
     let accent = accent(s);
     // Presets have saturation 0.85, so for them the values below stay as tuned.
@@ -101,6 +102,6 @@ pub fn apply(s: &Settings, window: Option<&mut Window>, cx: &mut App) {
     theme.radius_lg = px(12.);
     theme.shadow = true;
     theme.font_family = "Segoe UI Variable Text".into();
-    theme.font_size = px(DENSITY[s.density].0);
+    theme.font_size = px(s.fonts[s.density]);
     ROWS.store(s.density, Ordering::Relaxed);
 }

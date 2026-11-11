@@ -109,6 +109,12 @@ fn replace_reg(exe: &Path) -> String {
     text
 }
 
+/// True while FilesProject is set up in Explorer's place: the backup made
+/// by `replace` exists until `restore` succeeds.
+pub fn is_on() -> bool {
+    backup_dir().is_some_and(|b| b.exists())
+}
+
 /// Folders, drives, Win+E, This PC and the Recycle Bin open the installed
 /// FilesProject.
 pub fn replace() -> Result<()> {
