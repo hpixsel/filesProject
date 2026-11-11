@@ -22,6 +22,8 @@ Usage:
 Exit codes: 0 done, 1 failed, 2 cancelled, 3 stalled, 4 no virtual files, 64 usage.";
 
 const PRINT_EVERY: Duration = Duration::from_millis(250);
+// shortcut: fixed width; read the console width if narrow terminals still wrap
+const LINE_WIDTH: usize = 79;
 const MIB: f64 = (1u64 << 20) as f64;
 
 fn main() {
@@ -170,30 +172,28 @@ fn print_progress(p: &Progress) {
         .filter(|&t| t > 0)
         .map(|t| format!(" ({:.0}%)", p.bytes_done as f64 * 100.0 / t as f64))
         .unwrap_or_default();
+    let head = format!(
+        "{}/{} files, {:.1} MiB{pct}  ",
+        p.files_done,
+        p.files_total,
+        p.bytes_done as f64 / MIB
+    );
     let name = p
         .current
         .as_ref()
         .map(|c| c.to_string())
         .unwrap_or_default();
-    let name: String = if name.chars().count() > 50 {
-        let tail: String = name
-            .chars()
-            .rev()
-            .take(49)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        format!("…{tail}")
+    // Keep the line short enough not to wrap, or `\r` cannot rewrite it.
+    let room = LINE_WIDTH.saturating_sub(head.chars().count());
+    let chars: Vec<char> = name.chars().collect();
+    let name: String = if chars.len() > room {
+        let tail = &chars[chars.len() + 1 - room.max(1)..];
+        format!("…{}", tail.iter().collect::<String>())
     } else {
         name
     };
-    print!(
-        "\r{}/{} files, {:.1} MiB{pct}  {name:<50}",
-        p.files_done,
-        p.files_total,
-        p.bytes_done as f64 / MIB
-    );
+    // `\x1b[2K` clears the previous, possibly longer, line.
+    print!("\r\x1b[2K{head}{name}");
     let _ = std::io::stdout().flush();
 }
 
