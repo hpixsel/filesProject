@@ -2491,6 +2491,15 @@ impl Explorer {
         }
     }
 
+    /// This tab's folder and where Back leads, nearest first (folders only).
+    pub fn recent(&self) -> Vec<PathBuf> {
+        std::iter::once(self.history.current())
+            .chain(self.history.back_list())
+            .filter(|p| !places::is_place(p))
+            .map(Path::to_path_buf)
+            .collect()
+    }
+
     pub fn current_dir(&self) -> &Path {
         self.history.current()
     }

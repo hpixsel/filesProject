@@ -27,7 +27,10 @@ actions!(
         PrevTab,
         ToggleSplit,
         OtherPane,
-        ToggleFavourite
+        ToggleFavourite,
+        OpenPalette,
+        OpenSettings,
+        ToggleDark
     ]
 );
 
@@ -42,6 +45,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("f6", ToggleSplit, Some(CONTEXT)),
         KeyBinding::new("ctrl-f6", OtherPane, Some(CONTEXT)),
         KeyBinding::new("ctrl-d", ToggleFavourite, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-p", OpenPalette, Some(CONTEXT)),
     ]);
 }
 
@@ -475,6 +479,132 @@ impl Workspace {
         let pane = &mut self.panes[pane_ix];
         pane.tabs.remove(ix);
         pane.active = pane.active.min(pane.tabs.len().saturating_sub(1));
+    }
+
+    /// Ctrl+Shift+P: every command, then recent and favourite folders.
+    fn open_palette(&mut self, _: &OpenPalette, window: &mut Window, cx: &mut Context<Self>) {
+        use crate::explorer as e;
+        use crate::palette::{Entry, Palette, Run};
+        let cmd = |label: String, hint: &str, action: Box<dyn Action>| Entry {
+            label,
+            hint: hint.into(),
+            run: Run::Action(action),
+        };
+        let mut entries = vec![
+            cmd(tr!("New tab", "Nowa karta"), "Ctrl+T", Box::new(NewTab)),
+            cmd(
+                tr!("Close tab", "Zamknij kartę"),
+                "Ctrl+W",
+                Box::new(CloseTab),
+            ),
+            cmd(
+                tr!("Split panes", "Podziel panele"),
+                "F6",
+                Box::new(ToggleSplit),
+            ),
+            cmd(
+                tr!("Other pane", "Drugi panel"),
+                "Ctrl+F6",
+                Box::new(OtherPane),
+            ),
+            cmd(
+                tr!("Favourite this folder", "Dodaj folder do ulubionych"),
+                "Ctrl+D",
+                Box::new(ToggleFavourite),
+            ),
+            cmd(
+                tr!("New folder", "Nowy folder"),
+                "Ctrl+Shift+N",
+                Box::new(e::NewFolder),
+            ),
+            cmd(tr!("Rename", "Zmień nazwę"), "F2", Box::new(e::Rename)),
+            cmd(tr!("Search", "Szukaj"), "Ctrl+F", Box::new(e::Search)),
+            cmd(
+                tr!("Thumbnails", "Miniatury"),
+                "Ctrl+Shift+G",
+                Box::new(e::ToggleGrid),
+            ),
+            cmd(
+                tr!("Preview pane", "Panel podglądu"),
+                "Alt+P",
+                Box::new(e::TogglePane),
+            ),
+            cmd(
+                tr!("Show hidden files", "Pokaż ukryte pliki"),
+                "Ctrl+H",
+                Box::new(e::ToggleHidden),
+            ),
+            cmd(
+                tr!("Open terminal here", "Otwórz terminal tutaj"),
+                "Ctrl+Alt+T",
+                Box::new(e::OpenTerminal),
+            ),
+            cmd(
+                tr!("Copy path", "Kopiuj ścieżkę"),
+                "Ctrl+Alt+C",
+                Box::new(e::CopyPath),
+            ),
+            cmd(
+                tr!("Paste from RDP", "Wklej z RDP"),
+                "Ctrl+V",
+                Box::new(e::PasteHere),
+            ),
+            cmd(
+                tr!("Properties", "Właściwości"),
+                "Alt+Enter",
+                Box::new(e::Properties),
+            ),
+            cmd(tr!("Refresh", "Odśwież"), "F5", Box::new(e::Refresh)),
+            cmd(tr!("Up", "W górę"), "Alt+Up", Box::new(e::GoUp)),
+            cmd(
+                tr!("Select all", "Zaznacz wszystko"),
+                "Ctrl+A",
+                Box::new(e::SelectAll),
+            ),
+            cmd(tr!("Settings", "Ustawienia"), "", Box::new(OpenSettings)),
+            cmd(
+                tr!("Light / dark", "Jasny / ciemny"),
+                "",
+                Box::new(ToggleDark),
+            ),
+        ];
+        // Folders: where the tabs are and have been, then the favourites.
+        let mut seen = std::collections::HashSet::new();
+        let tabs = self.panes.iter().flat_map(|p| p.tabs.iter());
+        let recent: Vec<PathBuf> = tabs.flat_map(|t| t.read(cx).recent()).collect();
+        let favourites = self.layout.0.iter().flat_map(|g| match g {
+            Group::Folders { paths, .. } => paths.clone(),
+            Group::Drives => Vec::new(),
+        });
+        for dir in recent.into_iter().chain(favourites) {
+            if seen.insert(dir.clone()) {
+                let label = dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| dir.display().to_string());
+                entries.push(Entry {
+                    label,
+                    hint: dir.display().to_string(),
+                    run: Run::Go(dir),
+                });
+            }
+        }
+        let me = cx.weak_entity();
+        let choose = move |run: &Run, window: &mut Window, cx: &mut App| {
+            let _ = me.update(cx, |this, cx| {
+                this.focus_active(window, cx);
+                match run {
+                    Run::Action(a) => window.dispatch_action(a.boxed_clone(), cx),
+                    Run::Go(dir) => this.go_to(dir.clone(), window, cx),
+                }
+            });
+        };
+        let palette = cx.new(|cx| Palette::new(entries, choose, window, cx));
+        let shown = palette.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            dialog.w(px(600.)).child(shown.clone())
+        });
+        palette.update(cx, |p, cx| p.focus(window, cx));
     }
 
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1075,6 +1205,14 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_split))
             .on_action(cx.listener(Self::other_pane))
             .on_action(cx.listener(Self::toggle_favourite))
+            .on_action(cx.listener(Self::open_palette))
+            .on_action(
+                cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ToggleDark, window, cx| {
+                prefs::set(cx, |s| s.dark = !s.dark);
+                this.focus_active(window, cx);
+            }))
             .text_color(cx.theme().foreground)
             .child(title)
             .child(
