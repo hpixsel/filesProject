@@ -4,6 +4,7 @@ pub mod clipboard;
 #[cfg(feature = "fake")]
 pub mod fake;
 pub mod io;
+pub mod process;
 pub mod shell;
 pub mod sta;
 

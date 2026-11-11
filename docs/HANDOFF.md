@@ -47,7 +47,6 @@ session reads.
     pasting regular files (`CF_HDROP`), for example from NanaZip or
     7-Zip, or a plain Explorer copy. Today the window says these come with
     M2. Folder sizes are computed in the background.
-3.  Q8 leftover: a job object, so `rdppaste` dies with the window.
 
 ## Open questions
 
@@ -60,7 +59,7 @@ These are from `docs/designs/files_project_m0.md`:
 *   **Q6:** what happens when the session drops or the clipboard changes.
 *   **Q7:** code signing.
 *   **Q8:** answered in M1. The protocol is `files_core::machine` (tab-separated lines on stdout; closing stdin cancels). One paste runs at a time.
-*   **Q8 still open:** a job object, so the child dies with the GUI. Today the child only cancels when stdin closes.
+*   **Q8 job object:** done. `files_win::process::kill_with_parent` puts `rdppaste` in a kill-on-close job, so a crashed window ends the paste, and delete-on-close removes its `.partial`.
 
 ## Experiments
 
