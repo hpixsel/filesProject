@@ -34,6 +34,7 @@ features = [
     "Win32_System_Registry", # the Windows accent colour
     "Win32_Globalization", # the display language
     "Win32_Graphics_Dwm", # the acrylic backdrop
+    "Win32_NetworkManagement_WNet", # network drives
 ]
 
 [features]

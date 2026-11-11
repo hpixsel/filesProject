@@ -58,7 +58,8 @@ pub struct Workspace {
     panes: Vec<Pane>,
     active_pane: usize,
     favourites: Vec<PathBuf>,
-    drives: Vec<PathBuf>,
+    /// Drive roots, with the share for mapped network drives.
+    drives: Vec<(PathBuf, Option<String>)>,
     settings: Settings,
     picker: Entity<ColorPickerState>,
     /// Read by the window's drop target at drop time: the active tab's folder…
@@ -98,7 +99,7 @@ impl Workspace {
             favourites: favourites::file()
                 .map(|f| favourites::load(&f))
                 .unwrap_or_default(),
-            drives: files_win::shell::drives(),
+            drives: drives(),
             settings,
             picker,
             drop_dir: Default::default(),
@@ -309,17 +310,71 @@ impl Workspace {
                 cx,
             ));
         }
-        side = side.child(heading(tr!("Drives", "Dyski")));
-        for (i, d) in self.drives.iter().enumerate() {
+        let drive_button = |id: &'static str, icon: IconName, tip: String, map: bool| {
+            Button::new(id)
+                .cursor_pointer()
+                .ghost()
+                .xsmall()
+                .icon(icon)
+                .tooltip(tip)
+                .on_click(cx.listener(move |this, _, w, cx| this.drive_dialog(map, w, cx)))
+        };
+        side = side.child(
+            div()
+                .flex()
+                .flex_row()
+                .items_end()
+                .child(heading(tr!("Drives", "Dyski")).flex_1())
+                .child(drive_button(
+                    "map-drive",
+                    IconName::Plus,
+                    tr!("Map network drive", "Podłącz dysk sieciowy"),
+                    true,
+                ))
+                .child(drive_button(
+                    "unmap-drive",
+                    IconName::Minus,
+                    tr!("Disconnect network drive", "Odłącz dysk sieciowy"),
+                    false,
+                )),
+        );
+        for (i, (d, share)) in self.drives.iter().enumerate() {
+            let (label, icon) = match share {
+                Some(s) => (format!("{} {s}", d.display()), IconName::Network),
+                None => (d.display().to_string(), IconName::HardDrive),
+            };
             side = side.child(entry(
                 format!("drive-{i}").into(),
-                d.display().to_string(),
-                IconName::HardDrive,
+                label,
+                icon,
                 d.clone(),
                 cx,
             ));
         }
         side
+    }
+
+    /// Windows' map / disconnect network drive dialog; the drive list is
+    /// read again when it changed something.
+    fn drive_dialog(&self, map: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(h) = explorer::hwnd(window) else {
+            return;
+        };
+        // The dialog runs its own message loop, so not inside GPUI's dispatch.
+        cx.spawn(async move |this, cx| {
+            let changed = if map {
+                files_win::shell::map_drive_dialog(h)
+            } else {
+                files_win::shell::disconnect_drive_dialog(h)
+            };
+            if changed {
+                let _ = this.update(cx, |w, cx| {
+                    w.drives = drives();
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
     }
 
     fn pane_view(&self, pane_ix: usize, cx: &mut Context<Self>) -> Div {
@@ -540,4 +595,14 @@ impl Render for Workspace {
                     .child(panes),
             )
     }
+}
+
+fn drives() -> Vec<(PathBuf, Option<String>)> {
+    files_win::shell::drives()
+        .into_iter()
+        .map(|d| {
+            let share = files_win::shell::network_path(&d);
+            (d, share)
+        })
+        .collect()
 }
