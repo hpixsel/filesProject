@@ -634,10 +634,42 @@ impl Workspace {
                             }),
                     );
                     if paths.is_empty() {
-                        side = side.child(div().px_2().text_sm().text_color(muted).child(tr!(
-                            "Ctrl+D or drop a folder here",
-                            "Ctrl+D albo upuść tu folder"
-                        )));
+                        // An empty group's hint takes drops too: favourites from
+                        // other groups, and folders from the list.
+                        side = side.child(
+                            div()
+                                .id(("empty-group", g))
+                                .px_2()
+                                .py_1()
+                                .rounded(radius)
+                                .text_sm()
+                                .text_color(muted)
+                                .drag_over::<SidebarDrag>(move |s, _, _, _| s.bg(hover))
+                                .drag_over::<DraggedFiles>(move |s, _, _, _| s.bg(hover))
+                                .on_drop(cx.listener(move |this, d: &SidebarDrag, _, cx| {
+                                    match d {
+                                        SidebarDrag::Item(fg, fi, _) => {
+                                            this.layout.move_item((*fg, *fi), (g, 0))
+                                        }
+                                        SidebarDrag::Group(from, _) => {
+                                            this.layout.move_group(*from, g)
+                                        }
+                                    }
+                                    this.save_favourites();
+                                    cx.notify();
+                                }))
+                                .on_drop(cx.listener(move |this, d: &DraggedFiles, _, cx| {
+                                    for p in d.paths().iter().filter(|p| p.is_dir()) {
+                                        this.layout.add_to(g, p.clone());
+                                    }
+                                    this.save_favourites();
+                                    cx.notify();
+                                }))
+                                .child(tr!(
+                                    "Ctrl+D or drop a folder here",
+                                    "Ctrl+D albo upuść tu folder"
+                                )),
+                        );
                     }
                     for (i, p) in paths.iter().enumerate() {
                         let label = p
