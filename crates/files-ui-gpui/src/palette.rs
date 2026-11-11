@@ -27,9 +27,14 @@ pub struct Palette {
     /// Indexes into `entries` that match what is typed.
     shown: Vec<usize>,
     selected: usize,
+    /// Keeps the chosen line in view as the arrows move.
+    scroll: ScrollHandle,
     /// Called with the chosen entry; the palette closes first.
     on_choose: Box<Choose>,
 }
+
+/// Lines listed at most; typing narrows the rest down.
+const SHOWN: usize = 200;
 
 /// Runs the chosen entry.
 type Choose = dyn Fn(&Run, &mut Window, &mut App);
@@ -97,6 +102,7 @@ impl Palette {
             entries,
             shown,
             selected: 0,
+            scroll: ScrollHandle::new(),
             on_choose: Box::new(on_choose),
         }
     }
@@ -126,8 +132,9 @@ impl Render for Palette {
             .id("palette-list")
             .v_flex()
             .max_h(px(360.))
-            .overflow_y_scroll();
-        for (row, &i) in self.shown.iter().enumerate().take(200) {
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll);
+        for (row, &i) in self.shown.iter().enumerate().take(SHOWN) {
             let e = &self.entries[i];
             list = list.child(
                 div()
@@ -160,12 +167,13 @@ impl Render for Palette {
             .gap_2()
             // Arrows move the choice while the field keeps the focus.
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
-                let last = this.shown.len().saturating_sub(1);
+                let last = this.shown.len().min(SHOWN).saturating_sub(1);
                 match e.keystroke.key.as_str() {
                     "down" => this.selected = (this.selected + 1).min(last),
                     "up" => this.selected = this.selected.saturating_sub(1),
                     _ => return,
                 }
+                this.scroll.scroll_to_item(this.selected);
                 cx.stop_propagation();
                 cx.notify();
             }))
