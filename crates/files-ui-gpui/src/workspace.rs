@@ -339,17 +339,23 @@ impl Workspace {
                 )),
         );
         for (i, (d, share)) in self.drives.iter().enumerate() {
-            let (label, icon) = match share {
-                Some(s) => (format!("{} {s}", d.display()), IconName::Network),
-                None => (d.display().to_string(), IconName::HardDrive),
+            let icon = if share.is_some() {
+                IconName::Network
+            } else {
+                IconName::HardDrive
             };
-            side = side.child(entry(
+            let row = entry(
                 format!("drive-{i}").into(),
-                label,
+                d.display().to_string(),
                 icon,
                 d.clone(),
                 cx,
-            ));
+            );
+            // The share is secondary: muted, after the letter.
+            side = side.child(match share {
+                Some(s) => row.child(div().truncate().text_color(muted).child(s.clone())),
+                None => row,
+            });
         }
         side
     }
