@@ -66,6 +66,12 @@ pub struct DraggedFiles {
     changed: Arc<AtomicBool>,
 }
 
+impl DraggedFiles {
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.paths
+    }
+}
+
 impl Render for DraggedFiles {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let label = match &self.paths[..] {
