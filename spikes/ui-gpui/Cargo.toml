@@ -1,0 +1,12 @@
+# Throwaway M1 spike: validates GPUI + gpui-kit on Windows. Not part of the
+# main workspace (own [workspace] table), so CI does not build it.
+[package]
+name = "ui-gpui-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+gpui-kit = "=0.9.1"
