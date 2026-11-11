@@ -1,0 +1,57 @@
+name: Release
+
+# Pushing a tag like v0.2.0 builds, signs and publishes a GitHub release.
+# See docs/designs/updates.md.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    # The signing key is an environment secret; only v* tags may use it.
+    environment: release
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show
+      - name: Tag matches the app version
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path crates/files-ui-gpui/Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ("v$v" -ne $env:TAG) { throw "tag $env:TAG does not match version v$v" }
+      - run: cargo test --workspace --all-features
+      - run: cargo build --release --locked -p files-ui-gpui -p rdppaste
+      - run: cargo install rsign2 --locked --version 0.6.7
+      - name: Checksums and signature
+        shell: pwsh
+        env:
+          MINISIGN_KEY: ${{ secrets.MINISIGN_KEY }}
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/files.exe, target/release/rdppaste.exe dist/
+          Set-Location dist
+          Get-ChildItem *.exe | ForEach-Object {
+            "{0}  {1}" -f (Get-FileHash $_ -Algorithm SHA256).Hash.ToLower(), $_.Name
+          } | Set-Content -Encoding ascii SHA256SUMS.txt
+          $key = Join-Path $env:RUNNER_TEMP minisign.key
+          Set-Content -Path $key -Value $env:MINISIGN_KEY -NoNewline
+          try {
+            rsign sign -W -s $key -x SHA256SUMS.txt.minisig -t "FilesProject $env:TAG" SHA256SUMS.txt
+            if ($LASTEXITCODE) { throw "signing failed" }
+          } finally {
+            Remove-Item $key
+          }
+          # The key in the repo is the one the app trusts: a wrong secret stops here.
+          rsign verify -p ../minisign.pub -x SHA256SUMS.txt.minisig SHA256SUMS.txt
+          if ($LASTEXITCODE) { throw "signature does not match minisign.pub" }
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:TAG (Get-ChildItem dist/*).FullName --title "FilesProject $env:TAG" --generate-notes
+        shell: pwsh
