@@ -247,6 +247,7 @@ impl Workspace {
         let mut side = div()
             .v_flex()
             .w(px(200.))
+            .flex_shrink_0()
             .px_2()
             .child(heading("Favourites"));
         if self.favourites.is_empty() {
@@ -319,6 +320,7 @@ impl Workspace {
             .v_flex()
             .flex_1()
             .min_w_0()
+            .overflow_hidden()
             .border_t_2()
             .border_color(if focused {
                 border
@@ -336,7 +338,14 @@ impl Workspace {
                 }),
             )
             .child(div().px_3().child(bar))
-            .child(div().flex_1().min_h_0().child(pane.current().clone()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .child(pane.current().clone()),
+            )
     }
 }
 
@@ -419,7 +428,13 @@ impl Render for Workspace {
 
         // flex_row, not h_flex: h_flex centres children vertically instead of
         // stretching them, which collapsed the panes.
-        let mut panes = div().flex().flex_row().flex_1().min_h_0().gap_2();
+        let mut panes = div()
+            .flex()
+            .flex_row()
+            .flex_1()
+            .min_h_0()
+            .min_w_0() // panes share the width instead of pushing past the window
+            .gap_2();
         for i in 0..self.panes.len() {
             panes = panes.child(self.pane_view(i, cx));
         }
