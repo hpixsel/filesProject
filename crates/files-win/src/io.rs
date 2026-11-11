@@ -171,15 +171,20 @@ pub fn rename_no_replace(from: &Path, to: &Path) -> Result<()> {
 
 /// Free bytes available to the caller on the volume holding `dir`.
 pub fn free_bytes(dir: &Path) -> Result<u64> {
+    Ok(disk_space(dir)?.0)
+}
+
+/// (free, total) bytes on the volume holding `dir`, as this user sees them.
+pub fn disk_space(dir: &Path) -> Result<(u64, u64)> {
     let mut s = long_path(dir)?.into_os_string();
     if !s.to_string_lossy().ends_with('\\') {
         s.push("\\");
     }
     let w = wide(&s);
-    let mut free = 0u64;
-    // SAFETY: `w` is NUL-terminated; `free` outlives the call.
-    unsafe { GetDiskFreeSpaceExW(PCWSTR(w.as_ptr()), Some(&mut free), None, None)? };
-    Ok(free)
+    let (mut free, mut total) = (0u64, 0u64);
+    // SAFETY: `w` is NUL-terminated; both outputs outlive the call.
+    unsafe { GetDiskFreeSpaceExW(PCWSTR(w.as_ptr()), Some(&mut free), Some(&mut total), None)? };
+    Ok((free, total))
 }
 
 #[cfg(test)]

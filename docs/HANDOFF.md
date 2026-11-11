@@ -126,9 +126,27 @@ session reads.
     Win+E verb in HKCU through `reg.exe`; `files --restore-explorer` (or
     double-clicking `restore-explorer.reg`) undoes it. Needs the installed
     copy. Shipped in v0.3.0; owner test pending.
-9.  **Next:** a settings page (density steps, Explorer toggle), the
-    remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1), network drives on the
-    home network.
+9.  **Places, tabs and mouse (v0.4.0, tested by hand by the owner):**
+    *   **This PC** (`shell:MyComputerFolder`): drive tiles with a usage
+        bar, local and network apart (`this_pc_view`). Up from a drive root
+        goes there.
+    *   **Recycle Bin** (`shell:RecycleBinFolder`): read from the `$I`/`$R`
+        files (`files_app::places`), Restore moves `$R` back, Delete removes
+        both for good, "Empty Recycle Bin" is Windows' own.
+    *   **Middle click:** a folder opens in a new tab (and switches to it); a
+        tab closes.
+    *   **Tabs remembered:** panes and tabs saved on exit to
+        `session.txt`, reopened at start; `restore_tabs=false` in
+        `settings.txt` turns it off.
+    *   **Crash log:** panics go to
+        `%LOCALAPPDATA%\FilesProject\logs\files.log` with a backtrace.
+    *   **Fixed:** a crash when a tab's close button closed the last tab (the
+        click also reached the tab).
+    *   `--replace-explorer` now also takes This PC and the Recycle Bin;
+        whether the desktop icons use that verb is still to test.
+10. **Next:** a settings page (density steps, Explorer toggle, restore
+    tabs), the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1), network
+    drives on the home network.
 
 ## Open questions
 
