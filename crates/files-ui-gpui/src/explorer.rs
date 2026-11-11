@@ -178,6 +178,8 @@ pub struct Explorer {
     changed: Arc<AtomicBool>,
     /// Outcome of a file operation finished on another thread.
     thread_notice: Arc<Mutex<Option<String>>>,
+    /// Folder that drops land in; the drop target reads it at drop time.
+    drop_dir: Arc<Mutex<PathBuf>>,
     accent: usize,
     focus: FocusHandle,
 }
@@ -242,9 +244,16 @@ impl Explorer {
             conflict: None,
             changed,
             thread_notice: Default::default(),
+            drop_dir: Default::default(),
             accent: 0,
             focus: cx.focus_handle(),
         };
+        if let Some(h) = hwnd(window) {
+            let on_drop = this.report_done("Drop");
+            if let Err(e) = files_win::drop::register(h, this.drop_dir.clone(), on_drop) {
+                this.notice = format!("Drag and drop is off: {e}").into();
+            }
+        }
         this.load(window, cx);
         this.focus.focus(window, cx);
         this
@@ -252,6 +261,7 @@ impl Explorer {
 
     fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dir = self.history.current().to_path_buf();
+        *self.drop_dir.lock().unwrap() = dir.clone();
         let shown = dir.display().to_string();
         self.address
             .update(cx, |a, cx| a.set_value(shown, window, cx));
@@ -379,10 +389,7 @@ impl Explorer {
 
     /// Callback for a file operation running on its own thread: records the
     /// outcome and asks the next poll to reload the folder.
-    fn report_done(
-        &self,
-        what: &'static str,
-    ) -> impl FnOnce(files_win::Result<()>) + Send + 'static {
+    fn report_done(&self, what: &'static str) -> impl Fn(files_win::Result<()>) + Send + 'static {
         let (changed, notice) = (self.changed.clone(), self.thread_notice.clone());
         move |r| {
             // A cancelled Windows dialog returns an error too; say so plainly.

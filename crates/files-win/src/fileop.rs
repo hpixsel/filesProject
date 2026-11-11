@@ -96,6 +96,28 @@ fn operation(window: isize, flags: FILEOPERATION_FLAGS) -> Result<IFileOperation
     }
 }
 
+/// Copies (or moves) `items` (a data object or shell items) into `dest` on
+/// the calling OLE thread; returns when Windows has finished.
+pub fn transfer_now(
+    window: isize,
+    items: &windows::core::IUnknown,
+    dest: &Path,
+    mv: bool,
+) -> Result<()> {
+    let dest = item(dest)?;
+    let op = operation(window, FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR)?;
+    // SAFETY: COM calls on this thread's apartment.
+    unsafe {
+        if mv {
+            op.MoveItems(items, &dest)?;
+        } else {
+            op.CopyItems(items, &dest)?;
+        }
+        op.PerformOperations()?;
+    }
+    Ok(())
+}
+
 /// Runs `f` on a new OLE thread and `done` when it finishes.
 fn on_ole_thread(
     f: impl FnOnce(&Sta) -> Result<()> + Send + 'static,
@@ -112,19 +134,9 @@ fn on_ole_thread(
 pub fn paste_paths(window: isize, target: PathBuf, done: impl FnOnce(Result<()>) + Send + 'static) {
     on_ole_thread(
         move |_sta| {
-            // SAFETY: COM calls on this thread's apartment.
-            unsafe {
-                let data = OleGetClipboard()?;
-                let dest = item(&target)?;
-                let op = operation(window, FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR)?;
-                if wants_move(&data) {
-                    op.MoveItems(&data.cast::<windows::core::IUnknown>()?, &dest)?;
-                } else {
-                    op.CopyItems(&data.cast::<windows::core::IUnknown>()?, &dest)?;
-                }
-                op.PerformOperations()?;
-            }
-            Ok(())
+            // SAFETY: called on this thread's apartment.
+            let data = unsafe { OleGetClipboard()? };
+            transfer_now(window, &data.cast()?, &target, wants_move(&data))
         },
         done,
     );

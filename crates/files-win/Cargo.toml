@@ -8,11 +8,12 @@ repository.workspace = true
 [dependencies]
 files-core.workspace = true
 tracing.workspace = true
-windows-core = { workspace = true, optional = true }
+windows-core.workspace = true
 
 [dependencies.windows]
 workspace = true
 features = [
+    "implement", # COM objects: the drop target, and the test fake
     "Win32_Foundation",
     "Win32_Graphics_Gdi", # STGMEDIUM and ReleaseStgMedium are gated behind it
     "Win32_System_Com",
@@ -29,10 +30,11 @@ features = [
     "Win32_System_Time",
     "Win32_System_JobObjects",
     "Win32_Security",
+    "Win32_System_SystemServices", # MODIFIERKEYS_FLAGS for IDropTarget
 ]
 
 [features]
-fake = ["windows/implement", "dep:windows-core"]
+fake = []
 
 [[test]]
 name = "virtual_files"
