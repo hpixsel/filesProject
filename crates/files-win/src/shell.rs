@@ -270,3 +270,36 @@ pub fn set_acrylic(window: isize) {
         )
     };
 }
+
+/// The share a mapped network drive points to, like `\\server\share`.
+/// Answered from Windows' own record, so a server that is down does not
+/// block it.
+pub fn network_path(drive: &Path) -> Option<String> {
+    use windows::Win32::NetworkManagement::WNet::WNetGetConnectionW;
+    let letter = HSTRING::from(drive.to_str()?.trim_end_matches('\\'));
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    // SAFETY: `buf` holds `len` UTF-16 units.
+    unsafe { WNetGetConnectionW(&letter, windows::core::PWSTR(buf.as_mut_ptr()), &mut len) }
+        .ok()
+        .ok()?;
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(String::from_utf16_lossy(&buf[..end]))
+}
+
+/// Windows' own "Map network drive" dialog (letter, folder, sign-in,
+/// reconnect at sign-in). Modal: call it outside GPUI's event dispatch.
+/// True when a drive was mapped.
+pub fn map_drive_dialog(window: isize) -> bool {
+    use windows::Win32::NetworkManagement::WNet::{WNetConnectionDialog, RESOURCETYPE_DISK};
+    // SAFETY: a valid owner window.
+    unsafe { WNetConnectionDialog(hwnd(window), RESOURCETYPE_DISK.0) }.is_ok()
+}
+
+/// Windows' own "Disconnect network drives" dialog. Modal, like
+/// [`map_drive_dialog`]. True when a drive was disconnected.
+pub fn disconnect_drive_dialog(window: isize) -> bool {
+    use windows::Win32::NetworkManagement::WNet::{WNetDisconnectDialog, RESOURCETYPE_DISK};
+    // SAFETY: a valid owner window.
+    unsafe { WNetDisconnectDialog(hwnd(window), RESOURCETYPE_DISK.0) }.is_ok()
+}

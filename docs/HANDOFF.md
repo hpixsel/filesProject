@@ -84,8 +84,18 @@ session reads.
         The window now asks for `MicaBackdrop` and `files_win::shell::set_acrylic`
         switches it to Windows 11's DWM acrylic: smooth, and solid while the
         window is inactive (the owner is fine with that).
-4.  **Next:** M5 (network drives), then M6 (CLI, updater, Explorer
-    replacement). Later, a settings page with adjustable density steps.
+4.  **M5 (branch `m5`):** the sidebar's Drives heading has + (Windows'
+    "Map network drive" dialog, `WNetConnectionDialog`) and - (disconnect
+    dialog). Network drives show a network icon and their share, muted
+    (`WNetGetConnectionW`). The dialogs are modal, so they run in a spawned
+    task outside GPUI's dispatch.
+    *   **Owner check:** the share shows. Mapping and disconnecting are not
+        tested yet (the owner was away from the home network).
+    *   **Known limit:** the drive list is read at start and after those
+        dialogs, not when a drive appears elsewhere (USB stick, Explorer).
+5.  **Next:** M6 (CLI, updater, Explorer replacement with
+    `--restore-explorer`). Later, a settings page with adjustable density
+    steps.
 
 ## Open questions
 
