@@ -51,7 +51,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-delete", DeleteForever, Some(CONTEXT)),
         KeyBinding::new("enter", OpenSel, Some(CONTEXT)),
         KeyBinding::new("ctrl-a", SelectAll, Some(CONTEXT)),
-        KeyBinding::new("ctrl-shift-c", CopyPath, Some(CONTEXT)),
+        // Ctrl+Shift+C is often taken globally (e.g. by ShareX), so Ctrl+Alt+C.
+        KeyBinding::new("ctrl-alt-c", CopyPath, Some(CONTEXT)),
     ]);
 }
 
@@ -573,7 +574,7 @@ impl Explorer {
         self.report_done("Drop")
     }
 
-    /// Ctrl+Shift+C: the selected paths (or the folder) as plain text, one
+    /// Ctrl+Alt+C: the selected paths (or the folder) as plain text, one
     /// per line, without the quotes Windows' "Copy as path" adds.
     fn copy_path(&mut self, _: &CopyPath, _: &mut Window, cx: &mut Context<Self>) {
         let mut paths = self.selected(cx);
@@ -685,6 +686,14 @@ impl Render for Explorer {
                     .on_click(cx.listener(|this, _, w, cx| this.refresh(&Refresh, w, cx))),
             )
             .child(div().flex_1().child(Input::new(&self.address)))
+            .child(
+                Button::new("copy-path")
+                    .cursor_pointer()
+                    .ghost()
+                    .icon(IconName::Copy)
+                    .tooltip("Copy path without quotes (Ctrl+Alt+C)")
+                    .on_click(cx.listener(|this, _, w, cx| this.copy_path(&CopyPath, w, cx))),
+            )
             .child(
                 Button::new("paste")
                     .cursor_pointer()
