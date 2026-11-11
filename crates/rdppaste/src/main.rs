@@ -122,10 +122,10 @@ fn paste_into(dir: &str, policy: ConflictPolicy) -> i32 {
     let (code, message) = match outcome {
         Outcome::Done(s) => {
             let text = format!(
-                "Done: {} files, {} new folders, {:.1} MiB",
+                "Done: {} files, {} new folders, {}",
                 s.files_written,
                 s.folders_created,
-                s.bytes as f64 / MIB
+                size(s.bytes)
             );
             println!("{text}");
             (0, text)
@@ -166,6 +166,15 @@ fn paste_into(dir: &str, policy: ConflictPolicy) -> i32 {
     code
 }
 
+/// KB below 1 MiB, so small pastes don't read as "0.0 MiB".
+fn size(bytes: u64) -> String {
+    if (bytes as f64) < MIB {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MiB", bytes as f64 / MIB)
+    }
+}
+
 fn print_progress(p: &Progress) {
     let pct = p
         .bytes_total
@@ -173,10 +182,10 @@ fn print_progress(p: &Progress) {
         .map(|t| format!(" ({:.0}%)", p.bytes_done as f64 * 100.0 / t as f64))
         .unwrap_or_default();
     let head = format!(
-        "{}/{} files, {:.1} MiB{pct}  ",
+        "{}/{} files, {}{pct}  ",
         p.files_done,
         p.files_total,
-        p.bytes_done as f64 / MIB
+        size(p.bytes_done)
     );
     let name = p
         .current

@@ -66,6 +66,20 @@ These are from `docs/designs/files_project_m0.md`:
         updates piled up. Fixed in `7efab0d`.
     *   **Lesson:** this test needs Windows Explorer. FilePilot copies
         nothing to the clipboard from inside a zip.
+*   **Real RDP paste (owner, 2026-11-11): works.** This is the core M0
+    goal.
+    *   **What was tested:** 2 small files (a `.zip` and a `.ps1`, about
+        29 KB) copied with Ctrl+C in Explorer on the server, pasted locally
+        with `rdppaste`, exit code 0.
+    *   **Client formats:** `FileGroupDescriptorW`, `FileContents`,
+        `Preferred DropEffect`, `CanIncludeInClipboardHistory` and
+        `CanUploadToCloudClipboard`. There is no `CF_HDROP` and no
+        `Shell IDList Array`, so the client offers only virtual files.
+    *   **Still to test:**
+        *   a large file of several GB (CUJ 1, G2);
+        *   a folder tree with cancel (CUJ 2);
+        *   a session drop (CUJ 6);
+        *   the Q6 cases.
 *   **Q1 baseline:** to do.
 *   **Q6 cases:** to do.
 
