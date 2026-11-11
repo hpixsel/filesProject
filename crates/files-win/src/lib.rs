@@ -1,8 +1,10 @@
 //! The only crate with `unsafe`, COM, OLE and Win32 calls. Exposes safe types.
 
 pub mod clipboard;
+pub mod drop;
 #[cfg(feature = "fake")]
 pub mod fake;
+pub mod fileop;
 pub mod io;
 pub mod process;
 pub mod shell;

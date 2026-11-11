@@ -4,11 +4,13 @@ use crate::theme;
 use files_app::{format_size, list_dir, History, Item};
 use files_core::machine::{self, Event};
 use files_core::Progress;
+use files_jobs::sizes::{scan_sizes, SizeScan};
 use gpui_kit::component::button::*;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::table::*;
 use gpui_kit::component::*;
 use gpui_kit::*;
+use std::collections::HashMap;
 use std::io::BufRead;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -17,7 +19,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-actions!(files, [GoBack, GoForward, GoUp, Refresh, PasteHere]);
+actions!(
+    files,
+    [
+        GoBack,
+        GoForward,
+        GoUp,
+        Refresh,
+        PasteHere,
+        CopySel,
+        CutSel,
+        DeleteSel,
+        DeleteForever,
+        OpenSel
+    ]
+);
 
 const CONTEXT: &str = "Explorer";
 
@@ -28,6 +44,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-up", GoUp, Some(CONTEXT)),
         KeyBinding::new("f5", Refresh, Some(CONTEXT)),
         KeyBinding::new("ctrl-v", PasteHere, Some(CONTEXT)),
+        KeyBinding::new("ctrl-c", CopySel, Some(CONTEXT)),
+        KeyBinding::new("ctrl-x", CutSel, Some(CONTEXT)),
+        KeyBinding::new("delete", DeleteSel, Some(CONTEXT)),
+        KeyBinding::new("shift-delete", DeleteForever, Some(CONTEXT)),
+        KeyBinding::new("enter", OpenSel, Some(CONTEXT)),
     ]);
 }
 
@@ -50,6 +71,8 @@ pub struct Listing {
     items: Vec<Item>,
     /// Set after a shell command that may have changed the folder.
     changed: Arc<AtomicBool>,
+    /// Folder sizes filled in by the background scan.
+    sizes: Arc<Mutex<HashMap<PathBuf, u64>>>,
 }
 
 impl TableDelegate for Listing {
@@ -112,9 +135,16 @@ impl TableDelegate for Listing {
                     .child(Icon::new(icon).text_color(color))
                     .child(item.name.clone())
             }
-            1 => div()
-                .text_color(muted)
-                .child(item.size.map(format_size).unwrap_or_default()),
+            1 => {
+                let size = match item.size {
+                    Some(n) => format_size(n),
+                    None => match self.sizes.lock().unwrap().get(&item.path) {
+                        Some(&n) => format_size(n),
+                        None => "…".to_string(), // still being scanned
+                    },
+                };
+                div().text_color(muted).child(size)
+            }
             _ => div().text_color(muted).child(
                 item.modified
                     .map(files_win::shell::local_time)
@@ -141,9 +171,15 @@ pub struct Explorer {
     /// Result of the last paste; survives folder reloads.
     notice: SharedString,
     paste: Option<Arc<Mutex<Paste>>>,
+    /// Background folder-size scan of the current folder.
+    scan: Option<SizeScan>,
     /// Set when a paste stopped because files already exist; asks what to do.
     conflict: Option<SharedString>,
     changed: Arc<AtomicBool>,
+    /// Outcome of a file operation finished on another thread.
+    thread_notice: Arc<Mutex<Option<String>>>,
+    /// Folder that drops land in; the drop target reads it at drop time.
+    drop_dir: Arc<Mutex<PathBuf>>,
     accent: usize,
     focus: FocusHandle,
 }
@@ -154,6 +190,7 @@ impl Explorer {
         let listing = Listing {
             items: Vec::new(),
             changed: changed.clone(),
+            sizes: Default::default(),
         };
         let table = cx.new(|cx| TableState::new(listing, window, cx));
         let address = cx.new(|cx| InputState::new(window, cx));
@@ -203,11 +240,20 @@ impl Explorer {
             status: SharedString::default(),
             notice: SharedString::default(),
             paste: None,
+            scan: None,
             conflict: None,
             changed,
+            thread_notice: Default::default(),
+            drop_dir: Default::default(),
             accent: 0,
             focus: cx.focus_handle(),
         };
+        if let Some(h) = hwnd(window) {
+            let on_drop = this.report_done("Drop");
+            if let Err(e) = files_win::drop::register(h, this.drop_dir.clone(), on_drop) {
+                this.notice = format!("Drag and drop is off: {e}").into();
+            }
+        }
         this.load(window, cx);
         this.focus.focus(window, cx);
         this
@@ -215,6 +261,7 @@ impl Explorer {
 
     fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dir = self.history.current().to_path_buf();
+        *self.drop_dir.lock().unwrap() = dir.clone();
         let shown = dir.display().to_string();
         self.address
             .update(cx, |a, cx| a.set_value(shown, window, cx));
@@ -227,8 +274,14 @@ impl Explorer {
                 match listed {
                     Ok(items) => {
                         this.status = format!("{} items", items.len()).into();
+                        let dirs = items.iter().filter(|i| i.is_dir).map(|i| i.path.clone());
+                        // Replacing the scan drops (cancels) the previous folder's one.
+                        let scan = scan_sizes(dirs.collect());
+                        let sizes = scan.results();
+                        this.scan = Some(scan);
                         this.table.update(cx, |t, cx| {
                             t.delegate_mut().items = items;
+                            t.delegate_mut().sizes = sizes;
                             t.refresh(cx);
                         });
                     }
@@ -273,8 +326,80 @@ impl Explorer {
         self.load(window, cx);
     }
 
-    fn paste_here(&mut self, _: &PasteHere, _: &mut Window, cx: &mut Context<Self>) {
-        self.start(None, cx);
+    /// Ctrl+V: real paths (Explorer copy, NanaZip, our Ctrl+C/X) go to
+    /// Windows' file engine; virtual files (RDP, zip contents) to rdppaste.
+    fn paste_here(&mut self, _: &PasteHere, window: &mut Window, cx: &mut Context<Self>) {
+        if !files_win::fileop::clipboard_has_paths() {
+            self.start(None, cx);
+            return;
+        }
+        let Some(h) = hwnd(window) else { return };
+        let dir = self.history.current().to_path_buf();
+        let report = self.report_done("Paste");
+        files_win::fileop::paste_paths(h, dir, report);
+    }
+
+    fn selected(&self, cx: &App) -> Option<Item> {
+        let table = self.table.read(cx);
+        let ix = table.selected_row()?;
+        table.delegate().items.get(ix).cloned()
+    }
+
+    fn copy_selected(&mut self, cut: bool, cx: &mut Context<Self>) {
+        let Some(item) = self.selected(cx) else {
+            return;
+        };
+        let result = files_win::Sta::new()
+            .and_then(|sta| files_win::fileop::set_clipboard(&sta, &item.path, cut));
+        self.notice = match result {
+            Ok(()) if cut => format!("Cut {}", item.name).into(),
+            Ok(()) => format!("Copied {}", item.name).into(),
+            Err(e) => format!("Cannot copy: {e}").into(),
+        };
+        cx.notify();
+    }
+
+    fn copy_sel(&mut self, _: &CopySel, _: &mut Window, cx: &mut Context<Self>) {
+        self.copy_selected(false, cx);
+    }
+    fn cut_sel(&mut self, _: &CutSel, _: &mut Window, cx: &mut Context<Self>) {
+        self.copy_selected(true, cx);
+    }
+
+    fn delete_selected(&mut self, permanent: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(item), Some(h)) = (self.selected(cx), hwnd(window)) else {
+            return;
+        };
+        let report = self.report_done("Delete");
+        files_win::fileop::delete(h, item.path, permanent, report);
+    }
+
+    fn delete_sel(&mut self, _: &DeleteSel, window: &mut Window, cx: &mut Context<Self>) {
+        self.delete_selected(false, window, cx);
+    }
+    fn delete_forever(&mut self, _: &DeleteForever, window: &mut Window, cx: &mut Context<Self>) {
+        self.delete_selected(true, window, cx);
+    }
+
+    fn open_sel(&mut self, _: &OpenSel, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self.table.read(cx).selected_row() {
+            self.open_row(ix, window, cx);
+        }
+    }
+
+    /// Callback for a file operation running on its own thread: records the
+    /// outcome and asks the next poll to reload the folder.
+    fn report_done(&self, what: &'static str) -> impl Fn(files_win::Result<()>) + Send + 'static {
+        let (changed, notice) = (self.changed.clone(), self.thread_notice.clone());
+        move |r| {
+            // A cancelled Windows dialog returns an error too; say so plainly.
+            let text = match r {
+                Ok(()) => format!("{what} done"),
+                Err(e) => format!("{what} did not finish: {e}"),
+            };
+            *notice.lock().unwrap() = Some(text);
+            changed.store(true, Ordering::SeqCst);
+        }
     }
 
     /// `flag` is the conflict choice (`--overwrite`, `--skip`, `--rename`),
@@ -305,6 +430,13 @@ impl Explorer {
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.changed.swap(false, Ordering::SeqCst) {
             self.load(window, cx);
+        }
+        if let Some(text) = self.thread_notice.lock().unwrap().take() {
+            self.notice = text.into();
+        }
+        if self.scan.is_some() {
+            // Repaint the size column as folder sizes arrive.
+            self.table.update(cx, |_, cx| cx.notify());
         }
         let Some(paste) = self.paste.clone() else {
             return;
@@ -551,6 +683,11 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::go_up))
             .on_action(cx.listener(Self::refresh))
             .on_action(cx.listener(Self::paste_here))
+            .on_action(cx.listener(Self::copy_sel))
+            .on_action(cx.listener(Self::cut_sel))
+            .on_action(cx.listener(Self::delete_sel))
+            .on_action(cx.listener(Self::delete_forever))
+            .on_action(cx.listener(Self::open_sel))
             .text_color(cx.theme().foreground)
             .child(TitleBar::new().child(div().pl_2().child("FilesProject")))
             .child(toolbar)
