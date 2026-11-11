@@ -20,10 +20,13 @@ use windows::Win32::UI::Shell::{
     FILEDESCRIPTORW,
 };
 
-/// Retries `f` for up to ~1 s while another process (e.g. clipboard
-/// history) holds the clipboard open.
-fn retry_open<T>(mut f: impl FnMut() -> windows::core::Result<T>) -> windows::core::Result<T> {
-    for _ in 0..20 {
+/// Retries `f` for up to ~3 s while another process holds the clipboard open.
+/// Clipboard history reads every format after a change; for a large shell
+/// data object that was observed to take over a second.
+pub(crate) fn retry_open<T>(
+    mut f: impl FnMut() -> windows::core::Result<T>,
+) -> windows::core::Result<T> {
+    for _ in 0..60 {
         match f() {
             Err(e) if e.code() == CLIPBRD_E_CANT_OPEN => {
                 std::thread::sleep(Duration::from_millis(50))

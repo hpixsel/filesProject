@@ -12,7 +12,12 @@ fn fake_survives_the_system_clipboard() {
         .file("x.txt", FakeFile::new(FakeContent::Bytes(b"hi".to_vec())))
         .into_data_object();
     // SAFETY: OLE is initialised on this thread by `sta`.
-    unsafe { OleSetClipboard(&obj).unwrap() };
+    // Flush at once: otherwise clipboard history asks *this* thread for the
+    // data, and a test thread that does not pump messages deadlocks it.
+    unsafe {
+        OleSetClipboard(&obj).unwrap();
+        OleFlushClipboard().unwrap();
+    }
     let names: Vec<String> = VirtualFiles::from_clipboard(&sta)
         .unwrap()
         .entries()

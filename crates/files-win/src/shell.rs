@@ -3,7 +3,7 @@
 //! values (`isize`) so UI crates need no Windows types.
 
 use std::cell::RefCell;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use windows::core::{Interface, HSTRING, PCSTR, PCWSTR};
 use windows::Win32::Foundation::{FILETIME, HWND, LPARAM, LRESULT, POINT, SYSTEMTIME, WPARAM};
@@ -105,16 +105,24 @@ extern "system" fn menu_subclass(
 /// Shows Explorer's context menu for `path` at the cursor and runs the chosen
 /// command. Runs a modal message loop: call it outside UI-framework event
 /// dispatch (e.g. from a spawned task). Returns whether a command ran.
-pub fn context_menu(window: isize, path: &Path) -> crate::Result<bool> {
+pub fn context_menu(window: isize, paths: &[PathBuf]) -> crate::Result<bool> {
     let h = hwnd(window);
-    // SAFETY: standard shell calls; the PIDL is freed below and the menu destroyed.
+    let pidls = Pidls::parse(paths)?;
+    // SAFETY: standard shell calls; the PIDLs live until `pidls` drops and
+    // the menu is destroyed.
     unsafe {
-        let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
-        SHParseDisplayName(&HSTRING::from(path.as_os_str()), None, &mut pidl, 0, None)?;
         let result = (|| -> crate::Result<bool> {
-            let mut child: *mut ITEMIDLIST = std::ptr::null_mut();
-            let folder: IShellFolder = SHBindToParent(pidl, Some(&mut child))?;
-            let cm: IContextMenu = folder.GetUIObjectOf(h, &[child as *const _], None)?;
+            // The items share a folder; each child ID points into its own PIDL.
+            let mut folder: Option<IShellFolder> = None;
+            let mut children = Vec::with_capacity(pidls.0.len());
+            for &p in &pidls.0 {
+                let mut child: *mut ITEMIDLIST = std::ptr::null_mut();
+                let f: IShellFolder = SHBindToParent(p, Some(&mut child))?;
+                folder.get_or_insert(f);
+                children.push(child as *const ITEMIDLIST);
+            }
+            let folder = folder.ok_or(crate::Error::BadDescriptor("no items"))?;
+            let cm: IContextMenu = folder.GetUIObjectOf(h, &children, None)?;
             let menu = CreatePopupMenu()?;
             cm.QueryContextMenu(menu, 0, 1, 0x7FFF, CMF_NORMAL)?;
 
@@ -148,8 +156,36 @@ pub fn context_menu(window: isize, path: &Path) -> crate::Result<bool> {
             let _ = DestroyMenu(menu);
             Ok(ran)
         })();
-        CoTaskMemFree(Some(pidl as *const _));
         result
+    }
+}
+
+/// Absolute PIDLs for paths, freed on drop.
+pub(crate) struct Pidls(pub(crate) Vec<*mut ITEMIDLIST>);
+
+impl Pidls {
+    pub(crate) fn parse(paths: &[PathBuf]) -> crate::Result<Pidls> {
+        let mut out = Pidls(Vec::with_capacity(paths.len()));
+        for p in paths {
+            let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
+            // SAFETY: valid string; on success the PIDL is owned by `out`.
+            unsafe { SHParseDisplayName(&HSTRING::from(p.as_os_str()), None, &mut pidl, 0, None)? };
+            out.0.push(pidl);
+        }
+        Ok(out)
+    }
+
+    pub(crate) fn as_slice(&self) -> Vec<*const ITEMIDLIST> {
+        self.0.iter().map(|&p| p as *const _).collect()
+    }
+}
+
+impl Drop for Pidls {
+    fn drop(&mut self) {
+        for &p in &self.0 {
+            // SAFETY: allocated by SHParseDisplayName, freed once.
+            unsafe { CoTaskMemFree(Some(p as *const _)) };
+        }
     }
 }
 
