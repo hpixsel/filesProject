@@ -5,33 +5,47 @@ session reads.
 
 ## Current state (2026-11-11)
 
-*   **M0 code:** P1–P4 are done on branch `m0-p1`. Nothing is pushed yet.
+*   **M0:** merged to `main` in PR #1. Real RDP pastes work: small files,
+    218 MiB, 1.1 GB through the unbuffered path, and cancel.
+*   **M1 (branch `m1`):** the first window, `files.exe`
+    (`crates/files-ui-gpui`), built with GPUI and gpui-kit.
+    *   **Layout:** a single pane with back, forward, up and refresh, an
+        address bar, and a table of files with folders first and icons.
+    *   **Opening:** double-click opens a folder, or a file with its
+        default app.
+    *   **Context menu:** right-click shows Explorer's own menu, dark in
+        dark mode.
+    *   **RDP paste:** Ctrl+V or the "Paste from RDP" button runs
+        `rdppaste --machine` as a child process, with progress and cancel.
+    *   **Look:** a Blurred backdrop and a palette derived from one accent
+        colour.
+    *   **Owner check:** the owner tested it by hand and everything worked.
 *   **Crates:**
-    *   `files-core`: the rules (names, the check before writing);
-    *   `files-win`: clipboard, I/O, and the test fake;
-    *   `files-jobs`: the job runner and the paste job;
-    *   `rdppaste`: the command-line tool.
-*   **Tests:** `cargo test --workspace --all-features` runs 33 tests, all
-    green. One more test is `#[ignore]`: the 5 GiB file.
-*   **Manual checks done:** `--help`, `--formats`, CUJ 3 (text on the
-    clipboard gives exit code 4), the usage error (exit code 64), and the
-    log file.
-*   **Not done yet:**
-    *   the real RDP run (CUJ 1, 2, 6) and the Q6 cases;
-    *   the Q1 freeze baseline;
-    *   the G2 measurement.
-
-    See `docs/testing-rdp.md`.
-*   **UI toolkit for M1:** GPUI + gpui-kit, decided by the owner. The
-    spike is described in `docs/research/ui-toolkit-2026-11.md`.
+    *   `files-core`: the rules, plus the `machine` line protocol;
+    *   `files-win`: clipboard, I/O, `shell` (context menu, open, dark
+        menus, local time), and the test fake;
+    *   `files-jobs`: the runner and the paste job;
+    *   `files-app`: folder listing and navigation history;
+    *   `files-ui-gpui`: the window;
+    *   `rdppaste`: the command-line tool, and the worker process for the
+        GUI.
+*   **Tests:** `cargo test --workspace --all-features` passes. The 5 GiB
+    test stays `#[ignore]`.
+*   **Lessons, see `docs/research/ui-toolkit-2026-11.md`:**
+    *   modal Win32 loops (menus, `ShellExecute`) must run outside GPUI's
+        event dispatch;
+    *   after changing colours, recompute `theme.tokens`;
+    *   icons need `with_assets(gpui_kit::assets::Assets)`.
+*   **Still open for M0:** CUJ 6 (session drop), the Q6 cases, the G2
+    `typeperf` measurement, and the Q1 baseline.
 
 ## Next step
 
-1.  The owner tests `rdppaste` against a real RDP server, and locally by
-    copying files out of a `.zip` in Explorer (see `docs/testing-rdp.md`).
-2.  Record the results under "Experiments" below.
-3.  Fix whatever the real client exposes.
-4.  Then close M0 and start M1 with the GPUI spike.
+1.  Merge `m1`, once CI is green on the PR.
+2.  Finish M1: interactive conflict handling (Q5) instead of "already
+    exists".
+3.  M2: the job queue, local copy, move and delete, and background folder
+    sizes.
 
 ## Open questions
 
@@ -43,7 +57,8 @@ These are from `docs/designs/files_project_m0.md`:
 *   **Q5:** the full conflict UI. M0 has only fail and `--overwrite`.
 *   **Q6:** what happens when the session drops or the clipboard changes.
 *   **Q7:** code signing.
-*   **Q8:** the child-process protocol for M1.
+*   **Q8:** answered in M1. The protocol is `files_core::machine` (tab-separated lines on stdout; closing stdin cancels). One paste runs at a time.
+*   **Q8 still open:** a job object, so the child dies with the GUI. Today the child only cancels when stdin closes.
 
 ## Experiments
 

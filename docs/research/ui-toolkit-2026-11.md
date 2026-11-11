@@ -102,3 +102,51 @@ as an ADR.
 *   Slint Palette: https://docs.slint.dev/latest/docs/slint/reference/std-widgets/globals/palette/
 *   iced 0.14: https://github.com/iced-rs/iced/releases/tag/0.14.0
 *   windows-reactor: https://github.com/microsoft/windows-rs/pull/4479, https://gist.github.com/kennykerr/1b52f354496042b138abd835277268dd
+
+## Spike results so far (2026-11-11, Windows 11, 3440×1440)
+
+*   **100k-row gpui-kit table:** no stutter when scrolling. This is the
+    owner's own observation.
+*   **RAM after start:** about 140 MB private and about 67 MB working set,
+    which is under the 150 MB limit. CPU at idle is close to 0.
+*   **Accent-derived palette at runtime:** works in both modes, once
+    `theme.tokens` is recomputed with `ThemeTokens::from(colors)` after
+    the colours change. Without that, components such as buttons keep
+    their old colours.
+*   **Window backdrop:**
+    *   The owner chose **Blurred** (glass) as the default.
+    *   Mica and Mica Alt look almost opaque on this machine, because Mica
+        samples the static system wallpaper and the live wallpaper comes
+        from Wallpaper Engine.
+    *   Opaque needs a background alpha of 1.
+    *   Only one layer should be translucent. Translucent layers stack, and
+        together they hide the backdrop.
+*   **OLE drop:** works after `RevokeDragDrop` and `RegisterDragDrop` with
+    our own `IDropTarget`.
+    *   Explorer files arrive with both `CF_HDROP` and
+        `FileGroupDescriptorW`.
+    *   Files from inside a `.zip` arrive as virtual files only.
+    *   `files-win` parses both.
+*   **Native shell context menu:** works, including submenus (Send to,
+    NanaZip) through `IContextMenu3::HandleMenuMsg2` in a window subclass.
+    Choosing a command works too; "Properties" opens the Windows dialog.
+    Two caveats:
+    *   **Crash, now fixed.** Calling `TrackPopupMenuEx` inside GPUI's mouse
+        handler re-enters GPUI while `AppCell` is borrowed, and the app
+        panics. The menu must be opened from a spawned task, outside any App
+        borrow. Every modal Win32 loop (menus, dialogs) needs the same
+        treatment.
+    *   **Dark menus:** Win32 menus stay light until the process calls the
+        undocumented uxtheme ordinals 135 (`SetPreferredAppMode`) and 136
+        (`FlushMenuThemes`). The shell's Properties dialog stays light,
+        which is a Windows limitation.
+*   **RAM after the drop and shell-menu tests:** about 164 MB private and
+    108 MB working set.
+    *   This is above the 150 MB target.
+    *   The likely cause is the shell extensions that the menu loads into
+    our process (NanaZip, ShareX, Notepad++, Defender…). That is the same
+    cost Explorer pays.
+    *   The base after start stays at about 140 MB.
+*   **Verdict:** GPUI + gpui-kit passes the spike. The open item is RAM
+    once shell extensions are loaded. Re-measure it in M1, and consider
+    showing the shell menu from a helper process if the number matters.

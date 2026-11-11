@@ -1,6 +1,7 @@
 //! Plain data and rules shared by every crate. No Windows calls, no `unsafe`.
 
 pub mod check;
+pub mod machine;
 pub mod relpath;
 
 pub use check::{check, ConflictPolicy, Problem};

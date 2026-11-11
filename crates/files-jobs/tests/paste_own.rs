@@ -343,25 +343,30 @@ fn cancel_during_slow_reads() {
 fn cancel_while_a_read_hangs() {
     let d = tmp("cancel-hang");
     let release = Arc::new(AtomicBool::new(false));
+    // Hang on the very first read, so the job is surely blocked (not merely
+    // between reads, where it would see cancel at once) when we cancel.
     let hang = faulty(
         FakeContent::Bytes(vec![1; 100]),
         0,
         None,
-        Some(10),
+        Some(0),
         Some(release.clone()),
     );
     let h = paste_from(d.clone(), Fail, LIMITS, move |sta| {
         VirtualFiles::from_data_object(sta, FakeFiles::new().file("h", hang).into_data_object())
     });
+    // The .partial exists right before the first read starts.
+    let partial = d.join("h.partial");
+    let until = Instant::now() + Duration::from_secs(5);
+    while !partial.exists() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(100));
     let tok = h.cancel_token();
-    let mut asked = None;
-    let o = h.wait(|_| {
-        if asked.is_none() {
-            tok.cancel();
-            asked = Some(Instant::now());
-        }
-    });
-    let took = asked.unwrap().elapsed();
+    tok.cancel();
+    let asked = Instant::now();
+    let o = h.wait(|_| {});
+    let took = asked.elapsed();
     assert!(matches!(o, Outcome::Cancelled), "{o:?}");
     assert!(
         took >= Duration::from_millis(900) && took < Duration::from_millis(1400),
