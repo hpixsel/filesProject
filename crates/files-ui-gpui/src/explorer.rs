@@ -4,11 +4,13 @@ use crate::theme;
 use files_app::{format_size, list_dir, History, Item};
 use files_core::machine::{self, Event};
 use files_core::Progress;
+use files_jobs::sizes::{scan_sizes, SizeScan};
 use gpui_kit::component::button::*;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::table::*;
 use gpui_kit::component::*;
 use gpui_kit::*;
+use std::collections::HashMap;
 use std::io::BufRead;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -50,6 +52,8 @@ pub struct Listing {
     items: Vec<Item>,
     /// Set after a shell command that may have changed the folder.
     changed: Arc<AtomicBool>,
+    /// Folder sizes filled in by the background scan.
+    sizes: Arc<Mutex<HashMap<PathBuf, u64>>>,
 }
 
 impl TableDelegate for Listing {
@@ -112,9 +116,16 @@ impl TableDelegate for Listing {
                     .child(Icon::new(icon).text_color(color))
                     .child(item.name.clone())
             }
-            1 => div()
-                .text_color(muted)
-                .child(item.size.map(format_size).unwrap_or_default()),
+            1 => {
+                let size = match item.size {
+                    Some(n) => format_size(n),
+                    None => match self.sizes.lock().unwrap().get(&item.path) {
+                        Some(&n) => format_size(n),
+                        None => "…".to_string(), // still being scanned
+                    },
+                };
+                div().text_color(muted).child(size)
+            }
             _ => div().text_color(muted).child(
                 item.modified
                     .map(files_win::shell::local_time)
@@ -141,6 +152,8 @@ pub struct Explorer {
     /// Result of the last paste; survives folder reloads.
     notice: SharedString,
     paste: Option<Arc<Mutex<Paste>>>,
+    /// Background folder-size scan of the current folder.
+    scan: Option<SizeScan>,
     /// Set when a paste stopped because files already exist; asks what to do.
     conflict: Option<SharedString>,
     changed: Arc<AtomicBool>,
@@ -154,6 +167,7 @@ impl Explorer {
         let listing = Listing {
             items: Vec::new(),
             changed: changed.clone(),
+            sizes: Default::default(),
         };
         let table = cx.new(|cx| TableState::new(listing, window, cx));
         let address = cx.new(|cx| InputState::new(window, cx));
@@ -203,6 +217,7 @@ impl Explorer {
             status: SharedString::default(),
             notice: SharedString::default(),
             paste: None,
+            scan: None,
             conflict: None,
             changed,
             accent: 0,
@@ -227,8 +242,14 @@ impl Explorer {
                 match listed {
                     Ok(items) => {
                         this.status = format!("{} items", items.len()).into();
+                        let dirs = items.iter().filter(|i| i.is_dir).map(|i| i.path.clone());
+                        // Replacing the scan drops (cancels) the previous folder's one.
+                        let scan = scan_sizes(dirs.collect());
+                        let sizes = scan.results();
+                        this.scan = Some(scan);
                         this.table.update(cx, |t, cx| {
                             t.delegate_mut().items = items;
+                            t.delegate_mut().sizes = sizes;
                             t.refresh(cx);
                         });
                     }
@@ -305,6 +326,10 @@ impl Explorer {
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.changed.swap(false, Ordering::SeqCst) {
             self.load(window, cx);
+        }
+        if self.scan.is_some() {
+            // Repaint the size column as folder sizes arrive.
+            self.table.update(cx, |_, cx| cx.notify());
         }
         let Some(paste) = self.paste.clone() else {
             return;

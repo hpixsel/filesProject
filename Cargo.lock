@@ -1588,6 +1588,7 @@ version = "0.1.0"
 dependencies = [
  "files-app",
  "files-core",
+ "files-jobs",
  "files-win",
  "gpui-kit",
  "raw-window-handle",

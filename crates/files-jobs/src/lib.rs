@@ -1,6 +1,7 @@
 //! Runs work off the caller's thread with progress, cancel and a stall watchdog.
 
 pub mod paste;
+pub mod sizes;
 
 pub use paste::{paste, paste_from, Summary};
 
