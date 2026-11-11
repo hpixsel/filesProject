@@ -55,6 +55,17 @@ These are from `docs/designs/files_project_m0.md`:
     can fail with `CLIPBRD_E_CANT_OPEN` right after the clipboard
     changes**, because another process (such as clipboard history) holds
     it open. All three are retried for up to 1 s.
+*   **Local virtual-file paste (owner, 2026-11-11): works.**
+    *   **What was tested:** 3 files copied with Ctrl+C from inside a
+        `.zip` in Windows Explorer. `--formats` showed `Shell IDList Array`,
+        `FileGroupDescriptorW`, `FileContents` and `AsyncFlag`.
+    *   **First paste:** 3 files, 5.8 MiB, exit code 0.
+    *   **Second paste:** all three conflicts were listed, nothing was
+        written, exit code 1.
+    *   **Issue found:** the progress line wrapped in the terminal and
+        updates piled up. Fixed in `7efab0d`.
+    *   **Lesson:** this test needs Windows Explorer. FilePilot copies
+        nothing to the clipboard from inside a zip.
 *   **Q1 baseline:** to do.
 *   **Q6 cases:** to do.
 
