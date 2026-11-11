@@ -1595,6 +1595,7 @@ dependencies = [
  "files-jobs",
  "files-win",
  "gpui-kit",
+ "image",
  "raw-window-handle",
 ]
 

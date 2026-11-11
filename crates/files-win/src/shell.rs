@@ -493,6 +493,94 @@ pub fn link_target(link: &Path) -> Option<PathBuf> {
     (end > 0).then(|| PathBuf::from(String::from_utf16_lossy(&buf[..end])))
 }
 
+/// Pixels of the picture Windows shows for `path`, as (width, height,
+/// top-down BGRA): its icon, or with `thumbnail` its preview (a photo, a
+/// PDF page, a video frame), `None` when it has none. Can be slow: call it
+/// off the UI thread.
+pub fn shell_image(path: &Path, size: i32, thumbnail: bool) -> Option<(u32, u32, Vec<u8>)> {
+    use windows::Win32::Foundation::SIZE;
+    use windows::Win32::Graphics::Gdi::{
+        DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO,
+        BITMAPINFOHEADER, DIB_RGB_COLORS,
+    };
+    use windows::Win32::UI::Shell::{
+        IShellItem, IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK,
+        SIIGBF_ICONONLY, SIIGBF_THUMBNAILONLY,
+    };
+    let _sta = crate::Sta::new().ok()?;
+    // SAFETY: COM on this thread's apartment; the bitmap is read into a
+    // buffer of its own size and then deleted.
+    unsafe {
+        let item: IShellItem =
+            SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None).ok()?;
+        let factory: IShellItemImageFactory = item.cast().ok()?;
+        let kind = if thumbnail {
+            SIIGBF_THUMBNAILONLY
+        } else {
+            SIIGBF_ICONONLY
+        };
+        let bitmap = factory
+            .GetImage(SIZE { cx: size, cy: size }, kind | SIIGBF_BIGGERSIZEOK)
+            .ok()?;
+        let mut bm = BITMAP::default();
+        let got = GetObjectW(
+            bitmap,
+            std::mem::size_of::<BITMAP>() as i32,
+            Some(&mut bm as *mut _ as *mut _),
+        );
+        let (w, h) = (bm.bmWidth, bm.bmHeight);
+        let mut pixels = vec![0u8; (w.max(0) * h.max(0) * 4) as usize];
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h, // top-down rows
+                biPlanes: 1,
+                biBitCount: 32,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let dc = GetDC(None);
+        let rows = GetDIBits(
+            dc,
+            bitmap,
+            0,
+            h as u32,
+            Some(pixels.as_mut_ptr() as *mut _),
+            &mut info,
+            DIB_RGB_COLORS,
+        );
+        ReleaseDC(None, dc);
+        let _ = DeleteObject(bitmap);
+        if got == 0 || rows == 0 || pixels.is_empty() {
+            return None;
+        }
+        // Photos come without alpha: make them opaque instead of invisible.
+        if pixels.iter().skip(3).step_by(4).all(|&a| a == 0) {
+            pixels.iter_mut().skip(3).step_by(4).for_each(|a| *a = 255);
+        }
+        Some((w as u32, h as u32, pixels))
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    #[test]
+    fn icon_of_a_program() {
+        let exe = std::env::var("SystemRoot").unwrap() + r"\explorer.exe";
+        let (w, h, px) = shell_image(Path::new(&exe), 32, false).expect("an icon");
+        assert!(w >= 32 && h >= 32);
+        assert_eq!(px.len(), (w * h * 4) as usize);
+        assert!(
+            px.iter().skip(3).step_by(4).any(|&a| a > 0),
+            "something visible"
+        );
+    }
+}
+
 #[cfg(test)]
 mod link_tests {
     use super::*;

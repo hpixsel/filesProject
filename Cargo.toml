@@ -20,6 +20,8 @@ raw-window-handle = "=0.6.2"
 windows = "=0.58.0"
 windows-core = "=0.58.0"
 minisign-verify = "=0.3.0"
+# The pixel buffer type GPUI images are made of; already in the tree through GPUI.
+image = { version = "=0.25.10", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

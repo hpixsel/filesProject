@@ -182,21 +182,49 @@ fn list(dir: &Path, show_hidden: bool) -> std::io::Result<Vec<Item>> {
 /// `.lnk` shortcuts: their target, the name without `.lnk`, and a folder
 /// when the target is one (so it opens here, not in Explorer).
 fn with_links(mut items: Vec<Item>) -> Vec<Item> {
-    for i in items.iter_mut().filter(|i| is_lnk(&i.path)) {
+    for i in items.iter_mut().filter(|i| is_shortcut(&i.path)) {
+        if let Some(stem) = i.path.file_stem() {
+            i.name = stem.to_string_lossy().into_owned();
+        }
         if let Some(target) = files_win::shell::link_target(&i.path) {
             i.is_dir = target.is_dir();
             i.link = Some(target);
-            if let Some(stem) = i.path.file_stem() {
-                i.name = stem.to_string_lossy().into_owned();
-            }
         }
     }
     items
 }
 
-fn is_lnk(path: &Path) -> bool {
+/// `.lnk` and `.url` shortcuts, shown without their extension.
+fn is_shortcut(path: &Path) -> bool {
+    has_ext(path, &["lnk", "url"])
+}
+
+/// Files that show Windows' own icon (a game, a program) instead of ours.
+fn has_own_icon(path: &Path) -> bool {
+    has_ext(
+        path,
+        &["lnk", "url", "exe", "appref-ms", "msc", "cpl", "scr"],
+    )
+}
+
+fn has_ext(path: &Path, exts: &[&str]) -> bool {
     path.extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("lnk"))
+        .is_some_and(|e| exts.iter().any(|x| e.eq_ignore_ascii_case(x)))
+}
+
+/// Windows' picture for `path` (icon or thumbnail) as a GPUI image.
+fn shell_picture(path: &Path, size: i32, thumbnail: bool) -> Option<Arc<RenderImage>> {
+    let (w, h, bgra) = files_win::shell::shell_image(path, size, thumbnail)?;
+    // GPUI images are BGRA, the order Windows gives.
+    let frame = image::Frame::new(image::RgbaImage::from_raw(w, h, bgra)?);
+    Some(Arc::new(RenderImage::new(vec![frame])))
+}
+
+/// A file's preview shown by the pointer.
+struct Preview {
+    path: PathBuf,
+    image: Arc<RenderImage>,
+    at: Point<Pixels>,
 }
 
 /// A drive tile in This PC.
@@ -331,6 +359,8 @@ pub struct Listing {
     changed: Arc<AtomicBool>,
     /// Folder sizes filled in by the background scan.
     sizes: Arc<Mutex<HashMap<PathBuf, u64>>>,
+    /// Windows' own icons for programs and shortcuts, filled in the background.
+    icons: Arc<Mutex<HashMap<PathBuf, Arc<RenderImage>>>>,
     /// Rows selected with Ctrl/Shift+click (or the single selected row).
     marked: BTreeSet<usize>,
     /// Where a Shift+click range starts.
@@ -463,6 +493,16 @@ impl TableDelegate for Listing {
             }
             None => row,
         };
+        let row = match self.items.get(row_ix) {
+            Some(item) => {
+                let (me, path) = (self.explorer.clone(), item.path.clone());
+                row.on_hover(move |hovered, window, cx| {
+                    let path = path.clone();
+                    let _ = me.update(cx, |e, cx| e.hover_row(path, *hovered, window, cx));
+                })
+            }
+            None => row,
+        };
         let explorer = self.explorer.clone();
         let middle = self
             .items
@@ -542,7 +582,13 @@ impl TableDelegate for Listing {
         match col_ix {
             0 => {
                 let (icon, color) = item_icon(item, cx.theme().primary, muted);
-                let cell = div().h_flex().gap_2().child(icon.text_color(color));
+                let own = self.icons.lock().unwrap().get(&item.path).cloned();
+                let cell = div().h_flex().gap_2().child(match own {
+                    Some(picture) => img(ImageSource::Render(picture))
+                        .size_4()
+                        .into_any_element(),
+                    None => icon.text_color(color).into_any_element(),
+                });
                 match &self.renaming {
                     Some((path, input)) if *path == item.path => {
                         let me = self.explorer.clone();
@@ -627,6 +673,9 @@ pub struct Explorer {
     drives: Vec<Drive>,
     /// A folder just made with Ctrl+Shift+N, renamed once the list shows it.
     pending_rename: Option<PathBuf>,
+    /// The hover preview on screen, and a counter that drops stale ones.
+    preview: Option<Preview>,
+    hover_gen: usize,
     /// Letters typed to jump to a name, and when the last one came.
     typed: (String, std::time::Instant),
     focus: FocusHandle,
@@ -639,6 +688,7 @@ impl Explorer {
             items: Vec::new(),
             changed: changed.clone(),
             sizes: Default::default(),
+            icons: Default::default(),
             marked: Default::default(),
             anchor: None,
             place: Place::Folder,
@@ -718,6 +768,8 @@ impl Explorer {
             shown_hidden: false,
             drives: Vec::new(),
             pending_rename: None,
+            preview: None,
+            hover_gen: 0,
             typed: (String::new(), std::time::Instant::now()),
             focus: cx.focus_handle(),
         };
@@ -775,10 +827,19 @@ impl Explorer {
                         let scan = scan_sizes(dirs.collect());
                         let sizes = scan.results();
                         this.scan = Some(scan);
+                        let wants: Vec<PathBuf> = items
+                            .iter()
+                            .filter(|i| has_own_icon(&i.path))
+                            .map(|i| i.path.clone())
+                            .collect();
+                        let icons: Arc<Mutex<HashMap<PathBuf, Arc<RenderImage>>>> =
+                            Default::default();
+                        this.load_icons(wants, icons.clone(), window, cx);
                         this.table.update(cx, |t, cx| {
                             t.delegate_mut().items = items;
                             t.delegate_mut().place = place;
                             t.delegate_mut().sizes = sizes;
+                            t.delegate_mut().icons = icons;
                             t.delegate_mut().marked.clear();
                             t.delegate_mut().renaming = None;
                             t.delegate_mut().anchor = None;
@@ -929,8 +990,8 @@ impl Explorer {
             return;
         }
         let path = path.clone();
-        // A shortcut's name is edited without `.lnk`, which stays.
-        let shown = if is_lnk(&path) {
+        // A shortcut's name is edited without `.lnk`/`.url`, which stays.
+        let shown = if is_shortcut(&path) {
             path.file_stem()
         } else {
             path.file_name()
@@ -1077,6 +1138,91 @@ impl Explorer {
         });
     }
 
+    /// Windows' icons for `paths`, a few at a time off the UI thread, each
+    /// batch shown as it arrives. A newer folder has its own `icons`.
+    fn load_icons(
+        &mut self,
+        paths: Vec<PathBuf>,
+        icons: Arc<Mutex<HashMap<PathBuf, Arc<RenderImage>>>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            for chunk in paths.chunks(16) {
+                let chunk = chunk.to_vec();
+                let found = cx
+                    .background_spawn(async move {
+                        chunk
+                            .into_iter()
+                            .filter_map(|p| shell_picture(&p, 32, false).map(|i| (p, i)))
+                            .collect::<Vec<_>>()
+                    })
+                    .await;
+                icons.lock().unwrap().extend(found);
+                let alive = this.update(cx, |this, cx| this.table.update(cx, |_, cx| cx.notify()));
+                if alive.is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The pointer rests on a row: after a moment, Windows' preview of the
+    /// file (a photo, a PDF page, a video frame) shows next to it.
+    fn hover_row(
+        &mut self,
+        path: PathBuf,
+        hovered: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.hover_gen += 1;
+        if !hovered {
+            if self.preview.as_ref().is_some_and(|p| p.path == path) {
+                self.preview = None;
+                cx.notify();
+            }
+            return;
+        }
+        let file = self
+            .table
+            .read(cx)
+            .delegate()
+            .items
+            .iter()
+            .any(|i| i.path == path && !i.is_dir);
+        if !file || is_shortcut(&path) || Place::of(self.history.current()) != Place::Folder {
+            return;
+        }
+        let (gen, at) = (self.hover_gen, window.mouse_position());
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            let still = this
+                .update(cx, |this, _| this.hover_gen == gen)
+                .unwrap_or(false);
+            if !still {
+                return;
+            }
+            let p = path.clone();
+            let picture = cx
+                .background_spawn(async move { shell_picture(&p, 320, true) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let (true, Some(image)) = (this.hover_gen == gen, picture) {
+                    this.preview = Some(Preview { path, image, at });
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Esc while renaming: the old name stays.
     fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.table.update(cx, |t, cx| {
@@ -1108,10 +1254,10 @@ impl Explorer {
         }
         self.table.update(cx, |_, cx| cx.notify());
         self.focus.focus(window, cx);
-        let new = if is_lnk(&path) {
-            format!("{new}.lnk")
-        } else {
-            new
+        // A shortcut's hidden extension (.lnk, .url) stays.
+        let new = match path.extension().filter(|_| is_shortcut(&path)) {
+            Some(ext) => format!("{new}.{}", ext.to_string_lossy()),
+            None => new,
         };
         if path.file_name().is_some_and(|n| n.to_string_lossy() == new) {
             return;
@@ -1764,6 +1910,27 @@ impl Render for Explorer {
                     }),
             )
             .child(div().pt_2().child(status))
+            .children(self.preview.as_ref().map(|p| {
+                // Shown at its pixel size, beside the pointer, kept on screen.
+                let scale = window.scale_factor();
+                let size = p.image.size(0);
+                let (w, h) = (size.width.0 as f32 / scale, size.height.0 as f32 / scale);
+                deferred(
+                    anchored()
+                        .position(p.at + point(px(16.), px(16.)))
+                        .snap_to_window_with_margin(px(8.))
+                        .child(
+                            div()
+                                .p_1()
+                                .rounded(cx.theme().radius)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .bg(cx.theme().popover)
+                                .shadow_lg()
+                                .child(img(ImageSource::Render(p.image.clone())).w(px(w)).h(px(h))),
+                        ),
+                )
+            }))
     }
 }
 
