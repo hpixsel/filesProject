@@ -13,8 +13,8 @@ use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificL
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
     DefSubclassProc, IContextMenu, IContextMenu3, IShellFolder, RemoveWindowSubclass,
-    SHBindToParent, SHParseDisplayName, SetWindowSubclass, ShellExecuteW, CMF_NORMAL,
-    CMINVOKECOMMANDINFO,
+    SHBindToObject, SHBindToParent, SHParseDisplayName, SetWindowSubclass, ShellExecuteW,
+    CMF_CANRENAME, CMF_NORMAL, CMINVOKECOMMANDINFO, GCS_VERBA,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, DestroyMenu, GetCursorPos, TrackPopupMenuEx, SW_SHOWNORMAL, TPM_RETURNCMD,
@@ -102,62 +102,100 @@ extern "system" fn menu_subclass(
     unsafe { DefSubclassProc(h, msg, wp, lp) }
 }
 
-/// Shows Explorer's context menu for `path` at the cursor and runs the chosen
-/// command. Runs a modal message loop: call it outside UI-framework event
-/// dispatch (e.g. from a spawned task). Returns whether a command ran.
-pub fn context_menu(window: isize, paths: &[PathBuf]) -> crate::Result<bool> {
+/// What the user chose in a shell menu.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Picked {
+    Nothing,
+    /// A command ran; the folder may have changed.
+    Ran,
+    /// "Rename": Explorer edits the name in place, so the caller does.
+    Rename,
+}
+
+/// Explorer's own context menu for `paths` (all in one folder), at the
+/// cursor. Modal: call it outside GPUI's event dispatch.
+pub fn context_menu(window: isize, paths: &[PathBuf]) -> crate::Result<Picked> {
     let h = hwnd(window);
     let pidls = Pidls::parse(paths)?;
-    // SAFETY: standard shell calls; the PIDLs live until `pidls` drops and
-    // the menu is destroyed.
+    // SAFETY: standard shell calls; the PIDLs live until `pidls` drops.
     unsafe {
-        let result = (|| -> crate::Result<bool> {
-            // The items share a folder; each child ID points into its own PIDL.
-            let mut folder: Option<IShellFolder> = None;
-            let mut children = Vec::with_capacity(pidls.0.len());
-            for &p in &pidls.0 {
-                let mut child: *mut ITEMIDLIST = std::ptr::null_mut();
-                let f: IShellFolder = SHBindToParent(p, Some(&mut child))?;
-                folder.get_or_insert(f);
-                children.push(child as *const ITEMIDLIST);
-            }
-            let folder = folder.ok_or(crate::Error::BadDescriptor("no items"))?;
-            let cm: IContextMenu = folder.GetUIObjectOf(h, &children, None)?;
-            let menu = CreatePopupMenu()?;
-            cm.QueryContextMenu(menu, 0, 1, 0x7FFF, CMF_NORMAL)?;
-
-            MENU.with(|m| *m.borrow_mut() = cm.cast::<IContextMenu3>().ok());
-            let _ = SetWindowSubclass(h, Some(menu_subclass), 1, 0);
-            let mut pt = POINT::default();
-            let _ = GetCursorPos(&mut pt);
-            let cmd = TrackPopupMenuEx(
-                menu,
-                (TPM_RETURNCMD | TPM_RIGHTBUTTON).0,
-                pt.x,
-                pt.y,
-                h,
-                None,
-            )
-            .0;
-            let _ = RemoveWindowSubclass(h, Some(menu_subclass), 1);
-            MENU.with(|m| *m.borrow_mut() = None);
-
-            let ran = cmd > 0;
-            if ran {
-                let info = CMINVOKECOMMANDINFO {
-                    cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
-                    hwnd: h,
-                    lpVerb: PCSTR((cmd - 1) as usize as *const u8),
-                    nShow: SW_SHOWNORMAL.0,
-                    ..Default::default()
-                };
-                cm.InvokeCommand(&info)?;
-            }
-            let _ = DestroyMenu(menu);
-            Ok(ran)
-        })();
-        result
+        // The items share a folder; each child ID points into its own PIDL.
+        let mut folder: Option<IShellFolder> = None;
+        let mut children = Vec::with_capacity(pidls.0.len());
+        for &p in &pidls.0 {
+            let mut child: *mut ITEMIDLIST = std::ptr::null_mut();
+            let f: IShellFolder = SHBindToParent(p, Some(&mut child))?;
+            folder.get_or_insert(f);
+            children.push(child as *const ITEMIDLIST);
+        }
+        let folder = folder.ok_or(crate::Error::BadDescriptor("no items"))?;
+        let cm: IContextMenu = folder.GetUIObjectOf(h, &children, None)?;
+        track(h, &cm, CMF_NORMAL | CMF_CANRENAME)
     }
+}
+
+/// Explorer's menu for the empty space of folder `dir`: New (folder, file
+/// types), Paste, Properties and so on. Modal, like [`context_menu`].
+pub fn folder_menu(window: isize, dir: &Path) -> crate::Result<Picked> {
+    let h = hwnd(window);
+    let pidls = Pidls::parse(&[dir.to_path_buf()])?;
+    // SAFETY: as above; the folder's PIDL lives until `pidls` drops.
+    unsafe {
+        let folder: IShellFolder = SHBindToObject(None, pidls.0[0], None)?;
+        let cm: IContextMenu = folder.CreateViewObject(h)?;
+        track(h, &cm, CMF_NORMAL)
+    }
+}
+
+/// Shows `cm` at the cursor and runs the chosen command, except "rename",
+/// which is handed back.
+unsafe fn track(h: HWND, cm: &IContextMenu, flags: u32) -> crate::Result<Picked> {
+    let menu = CreatePopupMenu()?;
+    let result = (|| -> crate::Result<Picked> {
+        cm.QueryContextMenu(menu, 0, 1, 0x7FFF, flags)?;
+        // Owner-drawn and "New" submenus need their messages forwarded.
+        MENU.with(|m| *m.borrow_mut() = cm.cast::<IContextMenu3>().ok());
+        let _ = SetWindowSubclass(h, Some(menu_subclass), 1, 0);
+        let mut pt = POINT::default();
+        let _ = GetCursorPos(&mut pt);
+        let cmd = TrackPopupMenuEx(
+            menu,
+            (TPM_RETURNCMD | TPM_RIGHTBUTTON).0,
+            pt.x,
+            pt.y,
+            h,
+            None,
+        )
+        .0;
+        let _ = RemoveWindowSubclass(h, Some(menu_subclass), 1);
+        MENU.with(|m| *m.borrow_mut() = None);
+        if cmd <= 0 {
+            return Ok(Picked::Nothing);
+        }
+        let id = (cmd - 1) as usize;
+        let mut verb = [0u8; 64];
+        let named = cm.GetCommandString(
+            id,
+            GCS_VERBA,
+            None,
+            windows::core::PSTR(verb.as_mut_ptr()),
+            verb.len() as u32,
+        );
+        if named.is_ok() && verb.starts_with(b"rename\0") {
+            return Ok(Picked::Rename);
+        }
+        let info = CMINVOKECOMMANDINFO {
+            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFO>() as u32,
+            hwnd: h,
+            lpVerb: PCSTR(id as *const u8),
+            nShow: SW_SHOWNORMAL.0,
+            ..Default::default()
+        };
+        cm.InvokeCommand(&info)?;
+        Ok(Picked::Ran)
+    })();
+    let _ = DestroyMenu(menu);
+    result
 }
 
 /// Absolute PIDLs for paths, freed on drop.
@@ -416,4 +454,195 @@ pub fn empty_recycle_bin(window: isize) -> bool {
     use windows::Win32::UI::Shell::SHEmptyRecycleBinW;
     // SAFETY: a valid owner window; no root means every drive.
     unsafe { SHEmptyRecycleBinW(hwnd(window), PCWSTR::null(), 0) }.is_ok()
+}
+
+/// Windows' Properties window for a file or folder (it stays open on its
+/// own). Call it outside GPUI's event dispatch.
+pub fn properties(window: isize, path: &Path) {
+    use windows::Win32::UI::Shell::{SHObjectProperties, SHOP_FILEPATH};
+    // SAFETY: a valid owner window and a NUL-terminated path.
+    let _ = unsafe {
+        SHObjectProperties(
+            hwnd(window),
+            SHOP_FILEPATH,
+            &HSTRING::from(path.as_os_str()),
+            PCWSTR::null(),
+        )
+    };
+}
+
+/// Where a `.lnk` shortcut points, when that is a path on a disk (not a
+/// shell place or a URL). Reads the file through Windows' own shell link.
+pub fn link_target(link: &Path) -> Option<PathBuf> {
+    use windows::Win32::System::Com::{
+        CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER, STGM_READ,
+    };
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+    let _sta = crate::Sta::new().ok()?;
+    let mut buf = vec![0u16; 32_768];
+    // SAFETY: COM on this thread's apartment; `buf` is the output buffer.
+    unsafe {
+        let sl: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+        sl.cast::<IPersistFile>()
+            .ok()?
+            .Load(&HSTRING::from(link.as_os_str()), STGM_READ)
+            .ok()?;
+        sl.GetPath(&mut buf, std::ptr::null_mut(), 0).ok()?;
+    }
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(0);
+    (end > 0).then(|| PathBuf::from(String::from_utf16_lossy(&buf[..end])))
+}
+
+/// Pixels of the picture Windows shows for `path`, as (width, height,
+/// top-down BGRA): its icon, or with `thumbnail` its preview (a photo, a
+/// PDF page, a video frame), `None` when it has none. Can be slow: call it
+/// off the UI thread.
+pub fn shell_image(path: &Path, size: i32, thumbnail: bool) -> Option<(u32, u32, Vec<u8>)> {
+    use windows::Win32::Foundation::SIZE;
+    use windows::Win32::Graphics::Gdi::{
+        DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO,
+        BITMAPINFOHEADER, DIB_RGB_COLORS,
+    };
+    use windows::Win32::UI::Shell::{
+        IShellItem, IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK,
+        SIIGBF_ICONONLY, SIIGBF_THUMBNAILONLY,
+    };
+    let _sta = crate::Sta::new().ok()?;
+    // SAFETY: COM on this thread's apartment; the bitmap is read into a
+    // buffer of its own size and then deleted.
+    unsafe {
+        let item: IShellItem =
+            SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None).ok()?;
+        let factory: IShellItemImageFactory = item.cast().ok()?;
+        let kind = if thumbnail {
+            SIIGBF_THUMBNAILONLY // at most `size`: a photo would come whole
+        } else {
+            SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK
+        };
+        let bitmap = factory.GetImage(SIZE { cx: size, cy: size }, kind).ok()?;
+        let mut bm = BITMAP::default();
+        let got = GetObjectW(
+            bitmap,
+            std::mem::size_of::<BITMAP>() as i32,
+            Some(&mut bm as *mut _ as *mut _),
+        );
+        let (w, h) = (bm.bmWidth, bm.bmHeight);
+        let mut pixels = vec![0u8; (w.max(0) * h.max(0) * 4) as usize];
+        let mut info = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h, // top-down rows
+                biPlanes: 1,
+                biBitCount: 32,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let dc = GetDC(None);
+        let rows = GetDIBits(
+            dc,
+            bitmap,
+            0,
+            h as u32,
+            Some(pixels.as_mut_ptr() as *mut _),
+            &mut info,
+            DIB_RGB_COLORS,
+        );
+        ReleaseDC(None, dc);
+        let _ = DeleteObject(bitmap);
+        if got == 0 || rows == 0 || pixels.is_empty() {
+            return None;
+        }
+        // Photos come without alpha: make them opaque instead of invisible.
+        if pixels.iter().skip(3).step_by(4).all(|&a| a == 0) {
+            pixels.iter_mut().skip(3).step_by(4).for_each(|a| *a = 255);
+        }
+        Some((w as u32, h as u32, pixels))
+    }
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+
+    #[test]
+    fn icon_of_a_program() {
+        let exe = std::env::var("SystemRoot").unwrap() + r"\explorer.exe";
+        let (w, h, px) = shell_image(Path::new(&exe), 32, false).expect("an icon");
+        assert!(w >= 32 && h >= 32);
+        assert_eq!(px.len(), (w * h * 4) as usize);
+        assert!(
+            px.iter().skip(3).step_by(4).any(|&a| a > 0),
+            "something visible"
+        );
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    #[test]
+    fn reads_a_shortcut_to_a_folder() {
+        use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER};
+        use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+        let dir = std::env::temp_dir().join(format!("files-lnk-{}", std::process::id()));
+        let target = dir.join("Zażółć target");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = dir.join("to target.lnk");
+        {
+            let _sta = crate::Sta::new().unwrap();
+            // SAFETY: COM on this thread; makes the shortcut file.
+            unsafe {
+                let sl: IShellLinkW =
+                    CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).unwrap();
+                sl.SetPath(&HSTRING::from(target.as_os_str())).unwrap();
+                sl.cast::<IPersistFile>()
+                    .unwrap()
+                    .Save(&HSTRING::from(link.as_os_str()), true)
+                    .unwrap();
+            }
+        }
+        // Temp may be an 8.3 path (KACPER~1); compare where both lead.
+        let got = link_target(&link).map(|p| p.canonicalize().unwrap());
+        assert_eq!(got, Some(target.canonicalize().unwrap()));
+        assert_eq!(link_target(&dir.join("missing.lnk")), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod menu_tests {
+    use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetMenuItemCount, GetMenuStringW, MF_BYPOSITION,
+    };
+
+    /// The folder background menu builds outside Explorer (no window, no
+    /// view) and offers "New".
+    #[test]
+    fn folder_background_menu_has_items() {
+        let _sta = crate::Sta::new().unwrap();
+        let dir = std::env::temp_dir();
+        let pidls = Pidls::parse(std::slice::from_ref(&dir)).unwrap();
+        // SAFETY: as in `folder_menu`.
+        unsafe {
+            let folder: IShellFolder = SHBindToObject(None, pidls.0[0], None).unwrap();
+            let cm: IContextMenu = folder.CreateViewObject(HWND::default()).unwrap();
+            let menu = CreatePopupMenu().unwrap();
+            cm.QueryContextMenu(menu, 0, 1, 0x7FFF, CMF_NORMAL).unwrap();
+            let n = GetMenuItemCount(menu);
+            let names: Vec<String> = (0..n)
+                .map(|i| {
+                    let mut buf = [0u16; 128];
+                    let len = GetMenuStringW(menu, i as u32, Some(&mut buf), MF_BYPOSITION);
+                    String::from_utf16_lossy(&buf[..len.max(0) as usize])
+                })
+                .collect();
+            let _ = DestroyMenu(menu);
+            println!("{names:?}");
+            assert!(n > 0, "empty background menu");
+        }
+    }
 }

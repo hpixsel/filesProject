@@ -1,10 +1,11 @@
 //! The explorer pane: toolbar, address bar, file table, status bar.
 
 use files_app::places::{self, Place};
-use files_app::{format_size, list_dir, History, Item};
+use files_app::{format_size, list_dir, History, Item, SortBy};
 use files_core::machine::{self, Event};
 use files_core::Progress;
 use files_jobs::sizes::{scan_sizes, SizeScan};
+use files_win::shell::Picked;
 use gpui_kit::component::button::*;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::table::*;
@@ -38,7 +39,13 @@ actions!(
         OpenSel,
         CopyPath,
         SelectAll,
-        OpenTerminal
+        OpenTerminal,
+        Rename,
+        FocusAddress,
+        NewFolder,
+        ClearSelection,
+        Properties,
+        ToggleHidden
     ]
 );
 
@@ -49,6 +56,76 @@ const CONTEXT: &str = "Explorer";
 pub struct OpenInNewTab(pub PathBuf);
 
 impl EventEmitter<OpenInNewTab> for Explorer {}
+
+/// Files dragged inside the window, and their drag image.
+#[derive(Clone)]
+pub struct DraggedFiles {
+    paths: Vec<PathBuf>,
+    /// The source list, reloaded once a move has taken them away.
+    changed: Arc<AtomicBool>,
+}
+
+impl Render for DraggedFiles {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let label = match &self.paths[..] {
+            [one] => one
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            many => tr!("{} items", "Elementów: {}", many.len()),
+        };
+        div()
+            .px_3()
+            .py_1()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .text_color(cx.theme().foreground)
+            .child(label)
+    }
+}
+
+/// Drops dragged files into `dest` like Explorer: a move on the same
+/// drive, a copy to another; Ctrl copies, Shift moves. Windows shows
+/// progress, asks about conflicts, and Ctrl+Z undoes it.
+pub fn drop_files(
+    d: &DraggedFiles,
+    dest: &Path,
+    window: &Window,
+    dest_list: Option<Arc<AtomicBool>>,
+) {
+    // Not into itself, its own subfolder, or the folder it is already in.
+    let paths: Vec<PathBuf> = d
+        .paths
+        .iter()
+        .filter(|p| !dest.starts_with(p) && p.parent() != Some(dest))
+        .cloned()
+        .collect();
+    let (Some(first), Some(h)) = (paths.first(), hwnd(window)) else {
+        return;
+    };
+    if places::is_place(dest) {
+        return;
+    }
+    let drive = |p: &Path| {
+        p.components()
+            .next()
+            .map(|c| c.as_os_str().to_ascii_uppercase())
+    };
+    let m = window.modifiers();
+    let mv = !m.control && (m.shift || drive(first) == drive(dest));
+    let source = d.changed.clone();
+    files_win::fileop::transfer(h, paths, dest.to_path_buf(), mv, move |r| {
+        if let Err(e) = r {
+            eprintln!("drop: {e}");
+        }
+        source.store(true, Ordering::SeqCst);
+        if let Some(c) = dest_list {
+            c.store(true, Ordering::SeqCst);
+        }
+    });
+}
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -67,6 +144,16 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-alt-c", CopyPath, Some(CONTEXT)),
         // Ctrl+` does not arrive on a Polish keyboard layout.
         KeyBinding::new("ctrl-alt-t", OpenTerminal, Some(CONTEXT)),
+        KeyBinding::new("f2", Rename, Some(CONTEXT)),
+        // Explorer's keys: Backspace goes back, Ctrl+L/Alt+D/F4 to the address.
+        KeyBinding::new("backspace", GoBack, Some(CONTEXT)),
+        KeyBinding::new("ctrl-l", FocusAddress, Some(CONTEXT)),
+        KeyBinding::new("alt-d", FocusAddress, Some(CONTEXT)),
+        KeyBinding::new("f4", FocusAddress, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-n", NewFolder, Some(CONTEXT)),
+        KeyBinding::new("escape", ClearSelection, Some(CONTEXT)),
+        KeyBinding::new("alt-enter", Properties, Some(CONTEXT)),
+        KeyBinding::new("ctrl-h", ToggleHidden, Some(CONTEXT)),
     ]);
 }
 
@@ -83,13 +170,61 @@ pub fn hwnd(window: &Window) -> Option<isize> {
 /// re-enters GPUI while its state is borrowed and the app panics.
 /// The items at `dir`: a folder, or This PC (drives with free space), or
 /// the Recycle Bin. Runs off the UI thread; drives can be slow to answer.
-fn list(dir: &Path) -> std::io::Result<Vec<Item>> {
+fn list(dir: &Path, show_hidden: bool) -> std::io::Result<Vec<Item>> {
     let drives = files_win::shell::drives;
     Ok(match Place::of(dir) {
-        Place::Folder => return list_dir(dir),
+        Place::Folder => return list_dir(dir, show_hidden).map(with_links),
         Place::RecycleBin => places::recycle_bin(&drives()),
         Place::ThisPc => Vec::new(), // drive tiles instead, see `this_pc`
     })
+}
+
+/// `.lnk` shortcuts: their target, the name without `.lnk`, and a folder
+/// when the target is one (so it opens here, not in Explorer).
+fn with_links(mut items: Vec<Item>) -> Vec<Item> {
+    for i in items.iter_mut().filter(|i| is_shortcut(&i.path)) {
+        if let Some(stem) = i.path.file_stem() {
+            i.name = stem.to_string_lossy().into_owned();
+        }
+        if let Some(target) = files_win::shell::link_target(&i.path) {
+            i.is_dir = target.is_dir();
+            i.link = Some(target);
+        }
+    }
+    items
+}
+
+/// `.lnk` and `.url` shortcuts, shown without their extension.
+fn is_shortcut(path: &Path) -> bool {
+    has_ext(path, &["lnk", "url"])
+}
+
+/// Files that show Windows' own icon (a game, a program) instead of ours.
+fn has_own_icon(path: &Path) -> bool {
+    has_ext(
+        path,
+        &["lnk", "url", "exe", "appref-ms", "msc", "cpl", "scr"],
+    )
+}
+
+fn has_ext(path: &Path, exts: &[&str]) -> bool {
+    path.extension()
+        .is_some_and(|e| exts.iter().any(|x| e.eq_ignore_ascii_case(x)))
+}
+
+/// Windows' picture for `path` (icon or thumbnail) as a GPUI image.
+fn shell_picture(path: &Path, size: i32, thumbnail: bool) -> Option<Arc<RenderImage>> {
+    let (w, h, bgra) = files_win::shell::shell_image(path, size, thumbnail)?;
+    // GPUI images are BGRA, the order Windows gives.
+    let frame = image::Frame::new(image::RgbaImage::from_raw(w, h, bgra)?);
+    Some(Arc::new(RenderImage::new(vec![frame])))
+}
+
+/// A file's preview shown by the pointer.
+struct Preview {
+    path: PathBuf,
+    image: Arc<RenderImage>,
+    at: Point<Pixels>,
 }
 
 /// A drive tile in This PC.
@@ -125,6 +260,32 @@ fn this_pc() -> Vec<Drive> {
         .collect();
     drives.sort_by_key(|d| d.network);
     drives
+}
+
+/// Why `name` cannot be a file name in Windows, or `None` when it can.
+fn bad_name(name: &str) -> Option<String> {
+    if name.is_empty() || name == "." || name == ".." {
+        return Some(tr!(
+            "The name cannot be empty.",
+            "Nazwa nie może być pusta."
+        ));
+    }
+    if let Some(c) = name
+        .chars()
+        .find(|c| r#"\/:*?"<>|"#.contains(*c) || c.is_control())
+    {
+        return Some(tr!(
+            "A name cannot contain {c}",
+            "Nazwa nie może zawierać {c}"
+        ));
+    }
+    if name.ends_with(['.', ' ']) {
+        return Some(tr!(
+            "A name cannot end with a dot or a space.",
+            "Nazwa nie może kończyć się kropką ani spacją."
+        ));
+    }
+    None
 }
 
 /// Icon file (in `assets/icons`) and hue for a file or folder, from its
@@ -170,6 +331,14 @@ fn icon_kind(name: &str, is_dir: bool) -> Option<(&'static str, Option<f32>)> {
 /// The table's icon for `item` and its colour.
 fn item_icon(item: &Item, accent: Hsla, muted: Hsla) -> (Icon, Hsla) {
     let plain = if item.is_dir { accent } else { muted };
+    if item.link.is_some() {
+        let name = if item.is_dir {
+            "folder-symlink"
+        } else {
+            "file-symlink"
+        };
+        return (Icon::empty().path(format!("icons/{name}.svg")), plain);
+    }
     match icon_kind(&item.name, item.is_dir) {
         Some((name, hue)) => (
             Icon::empty().path(format!("icons/{name}.svg")),
@@ -190,6 +359,8 @@ pub struct Listing {
     changed: Arc<AtomicBool>,
     /// Folder sizes filled in by the background scan.
     sizes: Arc<Mutex<HashMap<PathBuf, u64>>>,
+    /// Windows' own icons for programs and shortcuts, filled in the background.
+    icons: Arc<Mutex<HashMap<PathBuf, Arc<RenderImage>>>>,
     /// Rows selected with Ctrl/Shift+click (or the single selected row).
     marked: BTreeSet<usize>,
     /// Where a Shift+click range starts.
@@ -198,9 +369,23 @@ pub struct Listing {
     place: Place,
     /// The view that owns this list, which emits `OpenInNewTab`.
     explorer: WeakEntity<Explorer>,
+    /// The row being renamed (F2) and its name field.
+    renaming: Option<(PathBuf, Entity<InputState>)>,
+    /// Set when a right-click hit a row, so the folder's menu stays shut.
+    row_menu: Arc<AtomicBool>,
+    /// The column order chosen in the header (kept across folders).
+    sort: (SortBy, bool),
 }
 
 impl Listing {
+    fn apply_sort(&mut self) {
+        let sizes = self.sizes.lock().unwrap();
+        let (by, descending) = self.sort;
+        files_app::sort_items(&mut self.items, by, descending, |i| {
+            i.size.or_else(|| sizes.get(&i.path).copied())
+        });
+    }
+
     fn marked_paths(&self) -> Vec<PathBuf> {
         self.marked
             .iter()
@@ -222,16 +407,48 @@ impl TableDelegate for Listing {
         self.items.len()
     }
     fn column(&self, col_ix: usize, _: &App) -> Column {
+        // The header shows the order in use (sorting is ours, see perform_sort).
+        let sort = |by: SortBy| match self.sort {
+            (b, false) if b == by => ColumnSort::Ascending,
+            (b, true) if b == by => ColumnSort::Descending,
+            _ => ColumnSort::Default,
+        };
         match col_ix {
-            0 => Column::new("name", tr!("Name", "Nazwa")).width(px(440.)),
-            1 => Column::new("size", tr!("Size", "Rozmiar")).width(px(110.)),
+            0 => Column::new("name", tr!("Name", "Nazwa"))
+                .width(px(440.))
+                .sort(sort(SortBy::Name)),
+            1 => Column::new("size", tr!("Size", "Rozmiar"))
+                .width(px(110.))
+                .sort(sort(SortBy::Size)),
             2 if self.place == Place::RecycleBin => {
                 Column::new("modified", tr!("Deleted", "Usunięto")).width(px(160.))
             }
-            2 => Column::new("modified", tr!("Modified", "Zmodyfikowano")).width(px(160.)),
+            2 => Column::new("modified", tr!("Modified", "Zmodyfikowano"))
+                .width(px(160.))
+                .sort(sort(SortBy::Modified)),
             _ => Column::new("origin", tr!("Original location", "Oryginalna lokalizacja"))
                 .width(px(320.)),
         }
+    }
+    /// A header click: that column ascending, descending, then back to the
+    /// name. Folders stay first.
+    fn perform_sort(
+        &mut self,
+        col_ix: usize,
+        sort: ColumnSort,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        let by = [SortBy::Name, SortBy::Size, SortBy::Modified][col_ix.min(2)];
+        self.sort = match sort {
+            ColumnSort::Ascending => (by, false),
+            ColumnSort::Descending => (by, true),
+            ColumnSort::Default => (SortBy::Name, false),
+        };
+        self.apply_sort();
+        self.marked.clear();
+        self.anchor = None;
+        cx.notify();
     }
     fn render_tr(
         &mut self,
@@ -246,12 +463,52 @@ impl TableDelegate for Listing {
         } else {
             row
         };
+        // Dragging a selected row takes the whole selection.
+        let dragged = if self.marked.contains(&row_ix) {
+            self.marked_paths()
+        } else {
+            self.items
+                .get(row_ix)
+                .map(|i| vec![i.path.clone()])
+                .unwrap_or_default()
+        };
+        let row = row.on_drag(
+            DraggedFiles {
+                paths: dragged,
+                changed: self.changed.clone(),
+            },
+            |d, _, _, cx| cx.new(|_| d.clone()),
+        );
+        // A folder row takes dropped files.
+        let row = match self.items.get(row_ix).filter(|i| i.is_dir) {
+            Some(dir) => {
+                let dest = dir.link.clone().unwrap_or_else(|| dir.path.clone());
+                let list = self.changed.clone();
+                let over = cx.theme().drag_border.opacity(0.25);
+                row.drag_over::<DraggedFiles>(move |s, _, _, _| s.bg(over))
+                    .on_drop(move |d: &DraggedFiles, window, cx| {
+                        drop_files(d, &dest, window, Some(list.clone()));
+                        cx.stop_propagation(); // not into the folder around it too
+                    })
+            }
+            None => row,
+        };
+        let row = match self.items.get(row_ix) {
+            Some(item) => {
+                let (me, path) = (self.explorer.clone(), item.path.clone());
+                row.on_hover(move |hovered, window, cx| {
+                    let path = path.clone();
+                    let _ = me.update(cx, |e, cx| e.hover_row(path, *hovered, window, cx));
+                })
+            }
+            None => row,
+        };
         let explorer = self.explorer.clone();
         let middle = self
             .items
             .get(row_ix)
             .filter(|i| i.is_dir)
-            .map(|i| i.path.clone());
+            .map(|i| i.link.clone().unwrap_or_else(|| i.path.clone()));
         row.on_mouse_down(MouseButton::Middle, move |_, _, cx| {
             if let Some(dir) = middle.clone() {
                 let _ = explorer.update(cx, |_, cx| cx.emit(OpenInNewTab(dir)));
@@ -290,13 +547,24 @@ impl TableDelegate for Listing {
                 let (Some(h), false) = (hwnd(window), paths.is_empty()) else {
                     return;
                 };
-                let changed = l.changed.clone();
+                l.row_menu.store(true, Ordering::SeqCst);
+                let (changed, me) = (l.changed.clone(), l.explorer.clone());
+                let handle = window.window_handle();
+                cx.stop_propagation(); // not the folder's own menu as well
                 cx.notify();
-                outside_dispatch(cx, move || {
-                    if let Ok(true) = files_win::shell::context_menu(h, &paths) {
-                        changed.store(true, Ordering::SeqCst);
-                    }
-                });
+                // The menu runs its own message loop: outside GPUI's dispatch.
+                cx.spawn(
+                    async move |_, cx| match files_win::shell::context_menu(h, &paths) {
+                        Ok(Picked::Ran) => changed.store(true, Ordering::SeqCst),
+                        Ok(Picked::Rename) => {
+                            let _ = cx.update_window(handle, |_, window, cx| {
+                                let _ = me.update(cx, |e, cx| e.rename(&Rename, window, cx));
+                            });
+                        }
+                        _ => {}
+                    },
+                )
+                .detach();
             }),
         )
     }
@@ -314,14 +582,42 @@ impl TableDelegate for Listing {
         match col_ix {
             0 => {
                 let (icon, color) = item_icon(item, cx.theme().primary, muted);
-                div()
-                    .h_flex()
-                    .gap_2()
-                    .child(icon.text_color(color))
-                    .child(item.name.clone())
+                let own = self.icons.lock().unwrap().get(&item.path).cloned();
+                let cell = div().h_flex().gap_2().child(match own {
+                    Some(picture) => img(ImageSource::Render(picture))
+                        .size_4()
+                        .into_any_element(),
+                    None => icon.text_color(color).into_any_element(),
+                });
+                match &self.renaming {
+                    Some((path, input)) if *path == item.path => {
+                        let me = self.explorer.clone();
+                        let input_size = match theme::table_size() {
+                            gpui_kit::component::Size::XSmall => gpui_kit::component::Size::XSmall,
+                            _ => gpui_kit::component::Size::Small,
+                        };
+                        cell.child(
+                            div()
+                                .flex_1()
+                                .on_key_down(move |e: &KeyDownEvent, window, cx| {
+                                    if e.keystroke.key == "escape" {
+                                        let _ = me
+                                            .update(cx, |this, cx| this.cancel_rename(window, cx));
+                                        cx.stop_propagation();
+                                    }
+                                })
+                                // The table's text size, and pulled left by the
+                                // field's padding and border so the name stays put.
+                                .ml(-(input_size.input_px() + px(1.)))
+                                .child(Input::new(input).with_size(input_size)),
+                        )
+                    }
+                    _ => cell.child(item.name.clone()),
+                }
             }
             1 => {
                 let size = match item.size {
+                    _ if item.is_dir && item.link.is_some() => String::new(),
                     Some(n) => format_size(n),
                     None => match self.sizes.lock().unwrap().get(&item.path) {
                         Some(&n) => format_size(n),
@@ -371,8 +667,17 @@ pub struct Explorer {
     thread_notice: Arc<Mutex<Option<String>>>,
     /// Language the column headers were built in.
     polish: bool,
+    /// Whether this listing shows hidden files; reloads when the setting changes.
+    shown_hidden: bool,
     /// This PC's drive tiles.
     drives: Vec<Drive>,
+    /// A folder just made with Ctrl+Shift+N, renamed once the list shows it.
+    pending_rename: Option<PathBuf>,
+    /// The hover preview on screen, and a counter that drops stale ones.
+    preview: Option<Preview>,
+    hover_gen: usize,
+    /// Letters typed to jump to a name, and when the last one came.
+    typed: (String, std::time::Instant),
     focus: FocusHandle,
 }
 
@@ -383,10 +688,14 @@ impl Explorer {
             items: Vec::new(),
             changed: changed.clone(),
             sizes: Default::default(),
+            icons: Default::default(),
             marked: Default::default(),
             anchor: None,
             place: Place::Folder,
             explorer: cx.weak_entity(),
+            renaming: None,
+            row_menu: Default::default(),
+            sort: Default::default(),
         };
         // Ctrl/Shift+click is ours (Listing::marked), not the table's single row.
         let table =
@@ -456,7 +765,12 @@ impl Explorer {
             changed,
             thread_notice: Default::default(),
             polish: i18n::polish(),
+            shown_hidden: false,
             drives: Vec::new(),
+            pending_rename: None,
+            preview: None,
+            hover_gen: 0,
+            typed: (String::new(), std::time::Instant::now()),
             focus: cx.focus_handle(),
         };
         this.load(window, cx);
@@ -495,30 +809,54 @@ impl Explorer {
             .detach();
             return;
         }
-        let task = cx.background_spawn(async move { list(&dir) });
+        self.shown_hidden = crate::prefs::get(cx).show_hidden;
+        let show_hidden = self.shown_hidden;
+        let task = cx.background_spawn(async move { list(&dir, show_hidden) });
         cx.spawn_in(window, async move |this, cx| {
             let listed = task.await;
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 match listed {
                     Ok(items) => {
                         this.status = tr!("{} items", "Elementów: {}", items.len()).into();
                         // Drives and Recycle Bin items: no folder-size scan.
                         let dirs = items
                             .iter()
-                            .filter(|i| i.is_dir && i.size.is_none())
+                            .filter(|i| i.is_dir && i.size.is_none() && i.link.is_none())
                             .map(|i| i.path.clone());
                         // Replacing the scan drops (cancels) the previous folder's one.
                         let scan = scan_sizes(dirs.collect());
                         let sizes = scan.results();
                         this.scan = Some(scan);
+                        let wants: Vec<PathBuf> = items
+                            .iter()
+                            .filter(|i| has_own_icon(&i.path))
+                            .map(|i| i.path.clone())
+                            .collect();
+                        let icons: Arc<Mutex<HashMap<PathBuf, Arc<RenderImage>>>> =
+                            Default::default();
+                        this.load_icons(wants, icons.clone(), window, cx);
                         this.table.update(cx, |t, cx| {
                             t.delegate_mut().items = items;
                             t.delegate_mut().place = place;
                             t.delegate_mut().sizes = sizes;
+                            t.delegate_mut().icons = icons;
                             t.delegate_mut().marked.clear();
+                            t.delegate_mut().renaming = None;
                             t.delegate_mut().anchor = None;
+                            t.delegate_mut().apply_sort();
                             t.refresh(cx);
                         });
+                        // Ctrl+Shift+N: the new folder's name is edited right away.
+                        if let Some(new) = this.pending_rename.take() {
+                            let items = &this.table.read(cx).delegate().items;
+                            if let Some(ix) = items.iter().position(|i| i.path == new) {
+                                this.table.update(cx, |t, cx| {
+                                    t.set_selected_row(ix, cx);
+                                    t.scroll_to_row(ix, cx);
+                                });
+                                this.rename(&Rename, window, cx);
+                            }
+                        }
                     }
                     Err(e) => {
                         this.status =
@@ -536,7 +874,7 @@ impl Explorer {
             return;
         };
         if item.is_dir {
-            self.history.go(item.path);
+            self.history.go(item.link.unwrap_or(item.path));
             self.load(window, cx);
         } else if let Some(h) = hwnd(window) {
             outside_dispatch(cx, move || {
@@ -640,6 +978,310 @@ impl Explorer {
     }
     fn delete_forever(&mut self, _: &DeleteForever, window: &mut Window, cx: &mut Context<Self>) {
         self.delete_selected(true, window, cx);
+    }
+
+    /// F2: the name in its row becomes editable; Enter or clicking away
+    /// renames, Esc cancels.
+    fn rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
+        let [path] = &self.selected(cx)[..] else {
+            return; // one item at a time
+        };
+        if Place::of(self.history.current()) != Place::Folder {
+            return;
+        }
+        let path = path.clone();
+        // A shortcut's name is edited without `.lnk`/`.url`, which stays.
+        let shown = if is_shortcut(&path) {
+            path.file_stem()
+        } else {
+            path.file_name()
+        };
+        let name = shown
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
+        cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, window, cx| {
+            if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                this.commit_rename(window, cx);
+            }
+        })
+        .detach();
+        input.update(cx, |i, cx| {
+            i.focus(window, cx);
+            i.select_all(window, cx);
+        });
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().renaming = Some((path, input));
+            cx.notify();
+        });
+    }
+
+    /// Explorer's menu for the folder itself: New folder or file, Paste,
+    /// Properties.
+    fn folder_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = self.history.current().to_path_buf();
+        let (Some(h), Place::Folder) = (hwnd(window), Place::of(&dir)) else {
+            return;
+        };
+        let changed = self.changed.clone();
+        outside_dispatch(cx, move || {
+            if let Ok(Picked::Ran) = files_win::shell::folder_menu(h, &dir) {
+                changed.store(true, Ordering::SeqCst);
+            }
+        });
+    }
+
+    fn focus_address(&mut self, _: &FocusAddress, window: &mut Window, cx: &mut Context<Self>) {
+        self.address.update(cx, |a, cx| {
+            a.focus(window, cx);
+            a.select_all(window, cx);
+        });
+    }
+
+    /// Ctrl+Shift+N: "New folder" (numbered if taken), then its name is
+    /// edited in place.
+    fn new_folder(&mut self, _: &NewFolder, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = self.history.current().to_path_buf();
+        if Place::of(&dir) != Place::Folder {
+            return;
+        }
+        let base = dir.join(tr!("New folder", "Nowy folder"));
+        let task = cx.background_spawn(async move {
+            let free = (1..1000)
+                .map(|n| {
+                    if n == 1 {
+                        base.clone()
+                    } else {
+                        files_core::numbered(&base, n)
+                    }
+                })
+                .find(|p| !p.exists())
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::AlreadyExists))?;
+            std::fs::create_dir(&free).map(|()| free)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let made = task.await;
+            let _ = this.update_in(cx, |this, window, cx| match made {
+                Ok(path) => {
+                    this.pending_rename = Some(path);
+                    this.load(window, cx);
+                }
+                Err(e) => {
+                    this.notice = tr!(
+                        "Cannot create a folder: {e}",
+                        "Nie można utworzyć folderu: {e}"
+                    )
+                    .into();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Esc: no selection (or, while renaming, the old name stays).
+    fn clear_selection(&mut self, _: &ClearSelection, window: &mut Window, cx: &mut Context<Self>) {
+        if self.table.read(cx).delegate().renaming.is_some() {
+            return self.cancel_rename(window, cx);
+        }
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().marked.clear();
+            t.delegate_mut().anchor = None;
+            t.clear_selection(cx);
+        });
+    }
+
+    /// Alt+Enter: Windows' Properties for the selection, or the folder.
+    fn properties(&mut self, _: &Properties, window: &mut Window, cx: &mut Context<Self>) {
+        let mut paths = self.selected(cx);
+        if paths.is_empty() && Place::of(self.history.current()) == Place::Folder {
+            paths.push(self.history.current().to_path_buf());
+        }
+        let (Some(path), Some(h)) = (paths.into_iter().next(), hwnd(window)) else {
+            return;
+        };
+        outside_dispatch(cx, move || files_win::shell::properties(h, &path));
+    }
+
+    /// Typing letters in the list jumps to the first name starting with
+    /// them, like Explorer; a pause of a second starts over.
+    fn type_to_select(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let m = e.keystroke.modifiers;
+        let Some(ch) = e.keystroke.key_char.clone() else {
+            return;
+        };
+        let typing_elsewhere = self
+            .address
+            .read(cx)
+            .focus_handle(cx)
+            .contains_focused(window, cx)
+            || self.table.read(cx).delegate().renaming.is_some();
+        if m.control || m.alt || m.platform || typing_elsewhere || ch.trim().is_empty() {
+            return;
+        }
+        let (typed, at) = &mut self.typed;
+        if at.elapsed() > Duration::from_secs(1) {
+            typed.clear();
+        }
+        typed.push_str(&ch.to_lowercase());
+        *at = std::time::Instant::now();
+        let prefix = typed.clone();
+        self.table.update(cx, |t, cx| {
+            let items = &t.delegate().items;
+            if let Some(ix) = items
+                .iter()
+                .position(|i| i.name.to_lowercase().starts_with(&prefix))
+            {
+                t.set_selected_row(ix, cx);
+                t.scroll_to_row(ix, cx);
+            }
+        });
+    }
+
+    /// Windows' icons for `paths`, a few at a time off the UI thread, each
+    /// batch shown as it arrives. A newer folder has its own `icons`.
+    fn load_icons(
+        &mut self,
+        paths: Vec<PathBuf>,
+        icons: Arc<Mutex<HashMap<PathBuf, Arc<RenderImage>>>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if paths.is_empty() {
+            return;
+        }
+        cx.spawn_in(window, async move |this, cx| {
+            for chunk in paths.chunks(16) {
+                let chunk = chunk.to_vec();
+                let found = cx
+                    .background_spawn(async move {
+                        chunk
+                            .into_iter()
+                            .filter_map(|p| shell_picture(&p, 32, false).map(|i| (p, i)))
+                            .collect::<Vec<_>>()
+                    })
+                    .await;
+                icons.lock().unwrap().extend(found);
+                let alive = this.update(cx, |this, cx| this.table.update(cx, |_, cx| cx.notify()));
+                if alive.is_err() {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The pointer rests on a row: after a moment, Windows' preview of the
+    /// file (a photo, a PDF page, a video frame) shows next to it.
+    fn hover_row(
+        &mut self,
+        path: PathBuf,
+        hovered: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.hover_gen += 1;
+        if !hovered {
+            if self.preview.as_ref().is_some_and(|p| p.path == path) {
+                self.preview = None;
+                cx.notify();
+            }
+            return;
+        }
+        let file = self
+            .table
+            .read(cx)
+            .delegate()
+            .items
+            .iter()
+            .any(|i| i.path == path && !i.is_dir);
+        if !file || is_shortcut(&path) || Place::of(self.history.current()) != Place::Folder {
+            return;
+        }
+        let (gen, at) = (self.hover_gen, window.mouse_position());
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            let still = this
+                .update(cx, |this, _| this.hover_gen == gen)
+                .unwrap_or(false);
+            if !still {
+                return;
+            }
+            let p = path.clone();
+            let picture = cx
+                .background_spawn(async move { shell_picture(&p, 320, true) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let (true, Some(image)) = (this.hover_gen == gen, picture) {
+                    this.preview = Some(Preview { path, image, at });
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Esc while renaming: the old name stays.
+    fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().renaming = None;
+            cx.notify();
+        });
+        self.focus.focus(window, cx);
+    }
+
+    /// Checks the new name, then renames off the UI thread (a network
+    /// share can be slow) and reloads the folder. A bad name keeps the row
+    /// editable and says why.
+    fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((path, input)) = self
+            .table
+            .update(cx, |t, _| t.delegate_mut().renaming.take())
+        else {
+            return; // Enter, then the blur it causes: renamed once
+        };
+        let new = input.read(cx).value().trim().to_string();
+        if let Some(why) = bad_name(&new) {
+            self.notice = why.into();
+            self.table.update(cx, |t, cx| {
+                t.delegate_mut().renaming = Some((path, input.clone()));
+                cx.notify();
+            });
+            input.update(cx, |i, cx| i.focus(window, cx));
+            return;
+        }
+        self.table.update(cx, |_, cx| cx.notify());
+        self.focus.focus(window, cx);
+        // A shortcut's hidden extension (.lnk, .url) stays.
+        let new = match path.extension().filter(|_| is_shortcut(&path)) {
+            Some(ext) => format!("{new}.{}", ext.to_string_lossy()),
+            None => new,
+        };
+        if path.file_name().is_some_and(|n| n.to_string_lossy() == new) {
+            return;
+        }
+        let (from, to) = (path.clone(), path.with_file_name(&new));
+        let task = cx.background_spawn(async move {
+            // Renaming to another case of the same name is allowed.
+            let same = from.to_string_lossy().to_lowercase() == to.to_string_lossy().to_lowercase();
+            if to.exists() && !same {
+                return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists));
+            }
+            std::fs::rename(&from, &to)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let r = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.notice = match r {
+                    Ok(()) => tr!("Renamed to {new}", "Zmieniono nazwę na {new}").into(),
+                    Err(e) => tr!("Cannot rename: {e}", "Nie można zmienić nazwy: {e}").into(),
+                };
+                this.load(window, cx);
+            });
+        })
+        .detach();
     }
 
     /// This PC like Explorer's: drive tiles with a usage bar, local drives
@@ -999,10 +1641,13 @@ fn start_paste(dir: &Path, flag: Option<&str>) -> std::io::Result<Arc<Mutex<Past
 }
 
 impl Render for Explorer {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.polish != i18n::polish() {
             self.polish = i18n::polish();
             self.table.update(cx, |t, cx| t.refresh(cx)); // column headers
+        }
+        if self.shown_hidden != crate::prefs::get(cx).show_hidden {
+            self.load(window, cx); // hidden files turned on or off
         }
         let muted = cx.theme().muted_foreground;
         let progress = self
@@ -1011,6 +1656,7 @@ impl Render for Explorer {
             .map(|p| p.lock().unwrap().progress.clone());
         let (can_back, can_forward) = (self.history.can_back(), self.history.can_forward());
         let in_bin = Place::of(self.history.current()) == Place::RecycleBin;
+        let drop_border = cx.theme().drag_border;
 
         let toolbar = div()
             .h_flex()
@@ -1203,6 +1849,15 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::copy_path))
             .on_action(cx.listener(Self::open_terminal))
+            .on_action(cx.listener(Self::rename))
+            .on_action(cx.listener(Self::focus_address))
+            .on_action(cx.listener(Self::new_folder))
+            .on_action(cx.listener(Self::clear_selection))
+            .on_action(cx.listener(Self::properties))
+            .on_action(cx.listener(|_, _: &ToggleHidden, _, cx| {
+                crate::prefs::set(cx, |s| s.show_hidden = !s.show_hidden)
+            }))
+            .on_key_down(cx.listener(Self::type_to_select))
             // The mouse's side buttons.
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
@@ -1222,6 +1877,30 @@ impl Render for Explorer {
                     .border_1()
                     .border_color(cx.theme().border)
                     .overflow_hidden()
+                    // Right-click on the empty space: the folder's own menu (New, Paste...).
+                    // The table takes every right-click for its own menu, so this
+                    // listens first (capture) and opens the folder's menu once
+                    // the click is handled, unless a row took it.
+                    .capture_any_mouse_down(cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                        if e.button != MouseButton::Right {
+                            return;
+                        }
+                        let row = this.table.read(cx).delegate().row_menu.clone();
+                        row.store(false, Ordering::SeqCst);
+                        cx.spawn_in(window, async move |this, cx| {
+                            if !row.load(Ordering::SeqCst) {
+                                let _ = this
+                                    .update_in(cx, |this, window, cx| this.folder_menu(window, cx));
+                            }
+                        })
+                        .detach();
+                    }))
+                    // Files dropped on the list (not on a folder row) land here.
+                    .drag_over::<DraggedFiles>(move |s, _, _, _| s.border_color(drop_border))
+                    .on_drop(cx.listener(|this, d: &DraggedFiles, window, _| {
+                        let here = this.history.current().to_path_buf();
+                        drop_files(d, &here, window, Some(this.changed.clone()))
+                    }))
                     .child(if Place::of(self.history.current()) == Place::ThisPc {
                         self.this_pc_view(cx).into_any_element()
                     } else {
@@ -1231,12 +1910,43 @@ impl Render for Explorer {
                     }),
             )
             .child(div().pt_2().child(status))
+            .children(self.preview.as_ref().map(|p| {
+                // Beside the pointer, kept on screen.
+                let scale = window.scale_factor();
+                let size = p.image.size(0);
+                // Fit in 320 x 320 logical px, keeping the shape.
+                let fit = (320. * scale / size.width.0.max(size.height.0) as f32).min(1.) / scale;
+                let (w, h) = (size.width.0 as f32 * fit, size.height.0 as f32 * fit);
+                deferred(
+                    anchored()
+                        .position(p.at + point(px(16.), px(16.)))
+                        .snap_to_window_with_margin(px(8.))
+                        .child(
+                            div()
+                                .p_1()
+                                .rounded(cx.theme().radius)
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .bg(cx.theme().popover)
+                                .shadow_lg()
+                                .child(img(ImageSource::Render(p.image.clone())).w(px(w)).h(px(h))),
+                        ),
+                )
+            }))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::icon_kind;
+
+    #[test]
+    fn bad_names() {
+        assert!(super::bad_name("ok name.txt").is_none());
+        for bad in ["", "..", "a/b", r"a\b", "x:y", "what?", "trail.", "trail "] {
+            assert!(super::bad_name(bad).is_some(), "{bad:?}");
+        }
+    }
 
     #[test]
     fn icons_by_name() {

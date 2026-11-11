@@ -52,3 +52,12 @@ Each milestone gets its own design document in `docs/designs/`.
 - [x] This PC (drive tiles) and the Recycle Bin (restore, delete, empty), also taken over from Explorer
 - [x] middle click: open a folder in a new tab, close a tab; tabs remembered between runs
 - [x] settings panel: Explorer replacement and remembered tabs toggles; window size and position remembered
+
+## After M6: everyday use (owner requests)
+
+- [x] resizable panes; drag a tab to move it or split
+- [x] drag files onto folders, panes and the sidebar (inside the window)
+- [ ] drag files out to Explorer and other apps
+- [x] F2 / context-menu rename in the row; folder background menu
+- [x] sorting, type to jump, Explorer's keys, new folder
+- [x] hidden files setting; `.lnk`/`.url` shortcuts; Windows icons; hover preview

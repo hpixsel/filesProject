@@ -120,6 +120,21 @@ fn page(picker: Entity<ColorPickerState>) -> Settings {
             )),
         )
         .group(
+            SettingGroup::new().title(tr!("Files", "Pliki")).item(
+                SettingItem::new(
+                    tr!("Show hidden files (Ctrl+H)", "Pokazuj ukryte pliki (Ctrl+H)"),
+                    SettingField::switch(
+                        |cx| prefs::get(cx).show_hidden,
+                        |v, cx| prefs::set(cx, |s| s.show_hidden = v),
+                    ),
+                )
+                .description(tr!(
+                    "Hidden and system files, like desktop.ini.",
+                    "Pliki ukryte i systemowe, np. desktop.ini."
+                )),
+            ),
+        )
+        .group(
             SettingGroup::new().title(tr!("Tabs", "Karty")).item(SettingItem::new(
                 tr!("Reopen the last tabs at start", "Przywracaj ostatnie karty przy starcie"),
                 SettingField::switch(

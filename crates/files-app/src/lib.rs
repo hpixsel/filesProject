@@ -14,21 +14,26 @@ pub struct Item {
     pub modified: Option<SystemTime>,
     /// Recycle Bin items: the folder they were deleted from.
     pub origin: Option<PathBuf>,
+    /// A `.lnk` shortcut's target (then `name` has no `.lnk`).
+    pub link: Option<PathBuf>,
 }
 
 /// Lists `dir`: folders first, then files, each by name ignoring case.
+/// Hidden and system entries (like `desktop.ini`) only with `show_hidden`.
 /// Entries that cannot be read (permissions, races) are skipped.
-pub fn list_dir(dir: &Path) -> io::Result<Vec<Item>> {
+pub fn list_dir(dir: &Path, show_hidden: bool) -> io::Result<Vec<Item>> {
     let mut items: Vec<Item> = std::fs::read_dir(dir)?
         .filter_map(Result::ok)
         .filter_map(|e| {
             let meta = e.metadata().ok()?;
+            use std::os::windows::fs::MetadataExt;
+            const HIDDEN_OR_SYSTEM: u32 = 0x2 | 0x4;
+            if !show_hidden && meta.file_attributes() & HIDDEN_OR_SYSTEM != 0 {
+                return None;
+            }
             // Junctions such as "Documents and Settings" are reparse points
             // that std reports as symlinks, not dirs; the attribute says dir.
-            let is_dir = meta.is_dir() || {
-                use std::os::windows::fs::MetadataExt;
-                meta.file_attributes() & 0x10 != 0 // FILE_ATTRIBUTE_DIRECTORY
-            };
+            let is_dir = meta.is_dir() || meta.file_attributes() & 0x10 != 0; // FILE_ATTRIBUTE_DIRECTORY
             Some(Item {
                 name: e.file_name().to_string_lossy().into_owned(),
                 path: e.path(),
@@ -36,11 +41,49 @@ pub fn list_dir(dir: &Path) -> io::Result<Vec<Item>> {
                 size: (!is_dir).then_some(meta.len()),
                 modified: meta.modified().ok(),
                 origin: None,
+                link: None,
             })
         })
         .collect();
     items.sort_by_cached_key(|i| (!i.is_dir, i.name.to_lowercase()));
     Ok(items)
+}
+
+/// What a listing is ordered by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortBy {
+    #[default]
+    Name,
+    Size,
+    Modified,
+}
+
+/// Orders `items` folders first (like Explorer), then by `by`; ties and
+/// equal values fall back to the name. `size_of` gives folder sizes, which
+/// a scan fills in later.
+pub fn sort_items(
+    items: &mut [Item],
+    by: SortBy,
+    descending: bool,
+    size_of: impl Fn(&Item) -> Option<u64>,
+) {
+    items.sort_by_cached_key(|i| {
+        let key = match by {
+            SortBy::Name => 0,
+            SortBy::Size => size_of(i).unwrap_or(0),
+            SortBy::Modified => i
+                .modified
+                .and_then(|m| m.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs()),
+        };
+        (!i.is_dir, key, i.name.to_lowercase())
+    });
+    if descending {
+        // Reverse within folders and within files, keeping folders first.
+        let split = items.iter().position(|i| !i.is_dir).unwrap_or(items.len());
+        items[..split].reverse();
+        items[split..].reverse();
+    }
 }
 
 /// Back / forward / up navigation, like a browser.
@@ -137,11 +180,27 @@ mod tests {
         std::fs::create_dir_all(d.join("Alpha")).unwrap();
         std::fs::write(d.join("b.txt"), "12345").unwrap();
         std::fs::write(d.join("A.txt"), "").unwrap();
-        let items = list_dir(&d).unwrap();
+        std::fs::write(d.join("desktop.ini"), "").unwrap();
+        let hidden = std::process::Command::new("attrib")
+            .args(["+h", "+s"])
+            .arg(d.join("desktop.ini"))
+            .status()
+            .unwrap();
+        assert!(hidden.success());
+        let items = list_dir(&d, false).unwrap();
         let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
         assert_eq!(names, ["Alpha", "zeta", "A.txt", "b.txt"]);
         assert_eq!(items[3].size, Some(5));
         assert_eq!(items[0].size, None);
+        assert_eq!(
+            list_dir(&d, true).unwrap().len(),
+            5,
+            "hidden shown when asked"
+        );
+        let _ = std::process::Command::new("attrib")
+            .args(["-h", "-s"])
+            .arg(d.join("desktop.ini"))
+            .status();
         std::fs::remove_dir_all(d).unwrap();
     }
 
@@ -165,6 +224,32 @@ mod tests {
         assert!(h.up(), "a drive root goes up to This PC");
         assert_eq!(h.current(), Path::new(places::THIS_PC));
         assert!(!h.up(), "This PC is the top");
+    }
+
+    #[test]
+    fn sorting_keeps_folders_first() {
+        let item = |name: &str, is_dir: bool, size: u64| Item {
+            name: name.into(),
+            path: PathBuf::from(name),
+            is_dir,
+            size: Some(size),
+            modified: None,
+            origin: None,
+            link: None,
+        };
+        let mut v = vec![
+            item("b.txt", false, 1),
+            item("Z", true, 9),
+            item("a.txt", false, 5),
+            item("y", true, 2),
+        ];
+        let names = |v: &[Item]| v.iter().map(|i| i.name.clone()).collect::<Vec<_>>();
+        sort_items(&mut v, SortBy::Name, false, |i| i.size);
+        assert_eq!(names(&v), ["y", "Z", "a.txt", "b.txt"]);
+        sort_items(&mut v, SortBy::Size, true, |i| i.size);
+        assert_eq!(names(&v), ["Z", "y", "a.txt", "b.txt"]);
+        sort_items(&mut v, SortBy::Name, true, |i| i.size);
+        assert_eq!(names(&v), ["Z", "y", "b.txt", "a.txt"]);
     }
 
     #[test]
@@ -283,6 +368,8 @@ pub mod settings {
         pub polish: Option<bool>,
         /// Reopen the last tabs and panes at start.
         pub restore_tabs: bool,
+        /// Show hidden and system files, like Explorer's option.
+        pub show_hidden: bool,
     }
 
     impl Default for Settings {
@@ -294,6 +381,7 @@ pub mod settings {
                 fonts: [16., 14., 13.],
                 polish: None,
                 restore_tabs: true,
+                show_hidden: false,
             }
         }
     }
@@ -319,6 +407,7 @@ pub mod settings {
                 "density" => s.density = value.parse::<usize>().unwrap_or(0).min(2),
                 "lang" => s.polish = Some(value == "pl"),
                 "restore_tabs" => s.restore_tabs = value != "false",
+                "show_hidden" => s.show_hidden = value == "true",
                 "fonts" => {
                     let n: Vec<f32> = value.split(' ').filter_map(|v| v.parse().ok()).collect();
                     if let [a, b, c] = n[..] {
@@ -340,6 +429,7 @@ pub mod settings {
             "accent={accent}\r\ndark={}\r\ndensity={}\r\nrestore_tabs={}\r\n",
             s.dark, s.density, s.restore_tabs
         );
+        text += &format!("show_hidden={}\r\n", s.show_hidden);
         let [a, b, c] = s.fonts;
         text += &format!("fonts={a} {b} {c}\r\n");
         if let Some(pl) = s.polish {
@@ -374,6 +464,7 @@ pub mod settings {
                 fonts: [18., 12.5, 11.],
                 polish: Some(true),
                 restore_tabs: false,
+                show_hidden: true,
             };
             assert_eq!(parse(&to_text(&s)), s);
             let w = Settings {

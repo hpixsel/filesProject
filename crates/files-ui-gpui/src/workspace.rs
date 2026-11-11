@@ -1,7 +1,7 @@
 //! The window: title bar, sidebar (favourites, drives), one or two panes,
 //! each pane with its own tabs. Every tab is an `Explorer`.
 
-use crate::explorer::{self, Explorer, OpenInNewTab};
+use crate::explorer::{self, DraggedFiles, Explorer, OpenInNewTab};
 use crate::i18n::tr;
 use crate::{prefs, theme};
 use files_app::favourites;
@@ -420,6 +420,57 @@ impl Workspace {
         });
     }
 
+    /// A tab dropped on a pane's files: it moves to that pane. Dropped on
+    /// its own pane while there is one pane, it becomes the second pane (a
+    /// copy of its folder when it is the only tab).
+    fn move_tab(
+        &mut self,
+        from: usize,
+        ix: usize,
+        to: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.panes.get(from).and_then(|p| p.tabs.get(ix)).cloned() else {
+            return;
+        };
+        if from == to {
+            if self.panes.len() > 1 {
+                return; // already there
+            }
+            let moved = if self.panes[from].tabs.len() > 1 {
+                self.take_tab(from, ix);
+                tab
+            } else {
+                let dir = tab.read(cx).current_dir().to_path_buf();
+                Self::explorer(dir, window, cx)
+            };
+            self.panes.push(Pane {
+                tabs: vec![moved],
+                active: 0,
+            });
+            self.active_pane = self.panes.len() - 1;
+        } else {
+            self.take_tab(from, ix);
+            let pane = &mut self.panes[to];
+            pane.tabs.push(tab);
+            pane.active = pane.tabs.len() - 1;
+            self.active_pane = to;
+            if self.panes[from].tabs.is_empty() {
+                self.panes.remove(from);
+                self.active_pane = 0;
+            }
+        }
+        self.focus_active(window, cx);
+    }
+
+    /// Removes a tab from its pane, keeping that pane's active index valid.
+    fn take_tab(&mut self, pane_ix: usize, ix: usize) {
+        let pane = &mut self.panes[pane_ix];
+        pane.tabs.remove(ix);
+        pane.active = pane.active.min(pane.tabs.len().saturating_sub(1));
+    }
+
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         crate::settings_page::open(self.picker.clone(), window, cx);
     }
@@ -455,7 +506,7 @@ impl Workspace {
         );
         let entry =
             |id: SharedString, label: String, icon: Icon, path: PathBuf, cx: &mut Context<Self>| {
-                let middle = path.clone();
+                let (middle, drop_dest) = (path.clone(), path.clone());
                 div()
                     .id(id)
                     .flex()
@@ -468,6 +519,10 @@ impl Workspace {
                     .rounded(radius)
                     .cursor_pointer()
                     .hover(move |s| s.bg(hover))
+                    .drag_over::<DraggedFiles>(move |s, _, _, _| s.bg(hover))
+                    .on_drop(move |d: &DraggedFiles, window, _| {
+                        explorer::drop_files(d, &drop_dest, window, None)
+                    })
                     .child(icon.text_color(icon_color))
                     .child(div().truncate().child(label))
                     .on_click(
@@ -633,6 +688,15 @@ impl Workspace {
                     .cursor_pointer()
                     .label(tab.read(cx).title())
                     .suffix(close)
+                    // Dragged onto a pane's files: moves there, or splits.
+                    .on_drag(
+                        DraggedTab {
+                            pane: pane_ix,
+                            ix: tab_ix,
+                            title: tab.read(cx).title(),
+                        },
+                        |d, _, _, cx| cx.new(|_| d.clone()),
+                    )
                     // Like a browser: the middle button closes a tab.
                     .on_mouse_down(
                         MouseButton::Middle,
@@ -642,6 +706,7 @@ impl Workspace {
                     ),
             );
         }
+        let drop_bg = cx.theme().drag_border.opacity(0.15);
         let border = if focused {
             cx.theme().primary
         } else {
@@ -675,6 +740,11 @@ impl Workspace {
                     .min_h_0()
                     .min_w_0()
                     .overflow_hidden()
+                    .rounded(cx.theme().radius_lg)
+                    .drag_over::<DraggedTab>(move |s, _, _, _| s.bg(drop_bg))
+                    .on_drop(cx.listener(move |this, d: &DraggedTab, window, cx| {
+                        this.move_tab(d.pane, d.ix, pane_ix, window, cx)
+                    }))
                     .child(pane.current().clone()),
             )
     }
@@ -770,16 +840,17 @@ impl Render for Workspace {
 
         // flex_row, not h_flex: h_flex centres children vertically instead of
         // stretching them, which collapsed the panes.
-        let mut panes = div()
-            .flex()
-            .flex_row()
-            .flex_1()
-            .min_h_0()
-            .min_w_0() // panes share the width instead of pushing past the window
-            .gap_2();
-        for i in 0..self.panes.len() {
-            panes = panes.child(self.pane_view(i, cx));
-        }
+        let panes = div().flex().flex_row().flex_1().min_h_0().min_w_0(); // panes share the width instead of pushing past the window
+                                                                          // Two panes: a handle between them sets their widths.
+        let panes = if self.panes.len() > 1 {
+            panes.child(
+                h_resizable("panes")
+                    .child(resizable_panel().child(self.pane_view(0, cx)))
+                    .child(resizable_panel().child(self.pane_view(1, cx))),
+            )
+        } else {
+            panes.child(self.pane_view(0, cx))
+        };
 
         div()
             .v_flex()
@@ -815,4 +886,26 @@ fn drives() -> Vec<(PathBuf, Option<String>)> {
             (d, share)
         })
         .collect()
+}
+
+/// A tab being dragged, and its drag image.
+#[derive(Clone)]
+struct DraggedTab {
+    pane: usize,
+    ix: usize,
+    title: String,
+}
+
+impl Render for DraggedTab {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_1()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .text_color(cx.theme().foreground)
+            .child(self.title.clone())
+    }
 }
