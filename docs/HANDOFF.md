@@ -20,11 +20,25 @@ session reads.
     *   **Look:** a Blurred backdrop and a palette derived from one accent
         colour.
     *   **Owner check:** the owner tested it by hand and everything worked.
+*   **M1 conflicts and Q8:** merged in PRs #3 and #4.
+    *   A paste that hits existing files asks Replace, Skip existing, or
+        Keep both.
+    *   `rdppaste` dies with the window through a job object.
+*   **M2:** ADR 0005, tested by hand by the owner.
+    *   **Folder sizes:** computed in the background by two workers, and
+        cancelled on navigation.
+    *   **Keys:** Ctrl+C, Ctrl+X, Ctrl+V, Delete, Shift+Delete and Enter.
+        They work through `IFileOperation`, so pastes interoperate with
+        Explorer.
+    *   **Drag and drop on the window:** copies by default, Shift moves.
+        It works with Explorer, NanaZip and 7-Zip.
+    *   **NanaZip clipboard:** NanaZip's Ctrl+C puts only text on the
+        clipboard, so drag and drop is the way in from NanaZip.
 *   **Crates:**
     *   `files-core`: the rules, plus the `machine` line protocol;
-    *   `files-win`: clipboard, I/O, `shell` (context menu, open, dark
+    *   `files-win`: clipboard, I/O, `fileop` (IFileOperation), `drop`, `process` (job object), `shell` (context menu, open, dark
         menus, local time), and the test fake;
-    *   `files-jobs`: the runner and the paste job;
+    *   `files-jobs`: the runner, the paste job, and folder sizes;
     *   `files-app`: folder listing and navigation history;
     *   `files-ui-gpui`: the window;
     *   `rdppaste`: the command-line tool, and the worker process for the
@@ -41,12 +55,9 @@ session reads.
 
 ## Next step
 
-1.  M1 is complete; conflict handling (Q5) was merged with branch
-    `m1-conflicts`.
-2.  M2: the job queue, plus local copy, move and delete. This includes
-    pasting regular files (`CF_HDROP`), for example from NanaZip or
-    7-Zip, or a plain Explorer copy. Today the window says these come with
-    M2. Folder sizes are computed in the background.
+1.  Multiple selection (Ctrl/Shift+click) for copy, cut, delete and the
+    context menu. Today these work on one item at a time.
+2.  M3: tabs, multiple panes, favourites, and "copy path" without quotes.
 
 ## Open questions
 

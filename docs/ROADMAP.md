@@ -22,9 +22,9 @@ Each milestone gets its own design document in `docs/designs/`.
 
 ## M2: local operations
 
-- [ ] job queue with concurrency limits
-- [ ] local copy, move and delete through Windows APIs
-- [ ] background folder sizes
+- [x] job queue with concurrency limits: not needed yet, see ADR 0005
+- [x] local copy, move and delete through Windows APIs (IFileOperation): Ctrl+C/X/V, Delete, drag and drop
+- [x] background folder sizes
 
 ## M3: daily use
 
