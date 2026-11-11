@@ -683,6 +683,10 @@ pub struct Explorer {
     pending_rename: Option<PathBuf>,
     /// The address shows as clickable crumbs; this is true while it is typed in.
     editing_address: bool,
+    /// Watches the folder on disk; `dirty` is set when it changes.
+    watch: Option<files_win::watch::Watch>,
+    dirty: Arc<AtomicBool>,
+    last_reload: std::time::Instant,
     /// The thumbnail view (large pictures) instead of the list.
     grid: bool,
     /// Thumbnails for the grid, filled in the background per folder.
@@ -789,6 +793,9 @@ impl Explorer {
             drives: Vec::new(),
             pending_rename: None,
             editing_address: false,
+            watch: None,
+            dirty: Default::default(),
+            last_reload: std::time::Instant::now(),
             grid: false,
             thumbs: Default::default(),
             preview: None,
@@ -808,6 +815,14 @@ impl Explorer {
         self.status = tr!("Loading…", "Wczytywanie…").into();
         cx.notify();
         let place = Place::of(&dir);
+        self.last_reload = std::time::Instant::now();
+        // Reloads when the folder changes on disk (folders only, not places).
+        self.watch = (place == Place::Folder)
+            .then(|| {
+                let dirty = self.dirty.clone();
+                files_win::watch::watch(&dir, move || dirty.store(true, Ordering::SeqCst)).ok()
+            })
+            .flatten();
         if place == Place::ThisPc {
             // The hidden table must not keep the last folder's selection, or
             // Delete here would act on files nobody can see.
@@ -867,15 +882,36 @@ impl Explorer {
                             this.load_thumbs(files, window, cx);
                         }
                         this.table.update(cx, |t, cx| {
-                            t.delegate_mut().items = items;
-                            t.delegate_mut().place = place;
-                            t.delegate_mut().sizes = sizes;
-                            t.delegate_mut().icons = icons;
-                            t.delegate_mut().marked.clear();
-                            t.delegate_mut().renaming = None;
-                            t.delegate_mut().anchor = None;
-                            t.delegate_mut().apply_sort();
+                            // A reload of the same folder keeps the selection.
+                            let l = t.delegate();
+                            let kept: BTreeSet<PathBuf> = l.marked_paths().into_iter().collect();
+                            let current = t
+                                .selected_row()
+                                .and_then(|ix| l.items.get(ix))
+                                .map(|i| i.path.clone());
+                            let l = t.delegate_mut();
+                            l.items = items;
+                            l.place = place;
+                            l.sizes = sizes;
+                            l.icons = icons;
+                            // A rename in progress survives a reload while its file is there.
+                            if let Some((p, _)) = &l.renaming {
+                                if !l.items.iter().any(|i| &i.path == p) {
+                                    l.renaming = None;
+                                }
+                            }
+                            l.anchor = None;
+                            l.apply_sort();
+                            l.marked = (0..l.items.len())
+                                .filter(|&i| kept.contains(&l.items[i].path))
+                                .collect();
+                            let row =
+                                current.and_then(|p| l.items.iter().position(|i| i.path == p));
                             t.refresh(cx);
+                            match row {
+                                Some(ix) => t.set_selected_row(ix, cx),
+                                None => t.clear_selection(cx),
+                            }
                         });
                         // Ctrl+Shift+N: the new folder's name is edited right away.
                         if let Some(new) = this.pending_rename.take() {
@@ -1808,6 +1844,13 @@ impl Explorer {
 
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.changed.swap(false, Ordering::SeqCst) {
+            self.load(window, cx);
+        }
+        // The folder changed on disk: reload, at most once a second, so a
+        // copy of thousands of files does not reload thousands of times.
+        if self.last_reload.elapsed() > Duration::from_secs(1)
+            && self.dirty.swap(false, Ordering::SeqCst)
+        {
             self.load(window, cx);
         }
         if let Some(text) = self.thread_notice.lock().unwrap().take() {

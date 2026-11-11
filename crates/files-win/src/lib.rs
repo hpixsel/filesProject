@@ -10,6 +10,7 @@ pub mod io;
 pub mod process;
 pub mod shell;
 pub mod sta;
+pub mod watch;
 
 pub use clipboard::{clipboard_object, formats, ContentReader, VirtualFiles};
 pub use sta::Sta;
