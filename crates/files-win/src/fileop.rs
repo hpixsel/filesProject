@@ -184,3 +184,18 @@ pub fn delete(
         done,
     );
 }
+
+/// Copies (or moves) `paths` (all in one folder) into `dest` on an OLE
+/// thread; Windows shows progress and asks about conflicts.
+pub fn transfer(
+    window: isize,
+    paths: Vec<PathBuf>,
+    dest: PathBuf,
+    mv: bool,
+    done: impl FnOnce(Result<()>) + Send + 'static,
+) {
+    on_ole_thread(
+        move |_sta| transfer_now(window, &item_array(&paths)?.cast()?, &dest, mv),
+        done,
+    );
+}

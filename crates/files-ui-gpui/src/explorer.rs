@@ -50,6 +50,76 @@ pub struct OpenInNewTab(pub PathBuf);
 
 impl EventEmitter<OpenInNewTab> for Explorer {}
 
+/// Files dragged inside the window, and their drag image.
+#[derive(Clone)]
+pub struct DraggedFiles {
+    paths: Vec<PathBuf>,
+    /// The source list, reloaded once a move has taken them away.
+    changed: Arc<AtomicBool>,
+}
+
+impl Render for DraggedFiles {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let label = match &self.paths[..] {
+            [one] => one
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            many => tr!("{} items", "Elementów: {}", many.len()),
+        };
+        div()
+            .px_3()
+            .py_1()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().popover)
+            .text_color(cx.theme().foreground)
+            .child(label)
+    }
+}
+
+/// Drops dragged files into `dest` like Explorer: a move on the same
+/// drive, a copy to another; Ctrl copies, Shift moves. Windows shows
+/// progress, asks about conflicts, and Ctrl+Z undoes it.
+pub fn drop_files(
+    d: &DraggedFiles,
+    dest: &Path,
+    window: &Window,
+    dest_list: Option<Arc<AtomicBool>>,
+) {
+    // Not into itself, its own subfolder, or the folder it is already in.
+    let paths: Vec<PathBuf> = d
+        .paths
+        .iter()
+        .filter(|p| !dest.starts_with(p) && p.parent() != Some(dest))
+        .cloned()
+        .collect();
+    let (Some(first), Some(h)) = (paths.first(), hwnd(window)) else {
+        return;
+    };
+    if places::is_place(dest) {
+        return;
+    }
+    let drive = |p: &Path| {
+        p.components()
+            .next()
+            .map(|c| c.as_os_str().to_ascii_uppercase())
+    };
+    let m = window.modifiers();
+    let mv = !m.control && (m.shift || drive(first) == drive(dest));
+    let source = d.changed.clone();
+    files_win::fileop::transfer(h, paths, dest.to_path_buf(), mv, move |r| {
+        if let Err(e) = r {
+            eprintln!("drop: {e}");
+        }
+        source.store(true, Ordering::SeqCst);
+        if let Some(c) = dest_list {
+            c.store(true, Ordering::SeqCst);
+        }
+    });
+}
+
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("alt-left", GoBack, Some(CONTEXT)),
@@ -245,6 +315,35 @@ impl TableDelegate for Listing {
             row.bg(cx.theme().table_active)
         } else {
             row
+        };
+        // Dragging a selected row takes the whole selection.
+        let dragged = if self.marked.contains(&row_ix) {
+            self.marked_paths()
+        } else {
+            self.items
+                .get(row_ix)
+                .map(|i| vec![i.path.clone()])
+                .unwrap_or_default()
+        };
+        let row = row.on_drag(
+            DraggedFiles {
+                paths: dragged,
+                changed: self.changed.clone(),
+            },
+            |d, _, _, cx| cx.new(|_| d.clone()),
+        );
+        // A folder row takes dropped files.
+        let row = match self.items.get(row_ix).filter(|i| i.is_dir) {
+            Some(dir) => {
+                let (dest, list) = (dir.path.clone(), self.changed.clone());
+                let over = cx.theme().drag_border.opacity(0.25);
+                row.drag_over::<DraggedFiles>(move |s, _, _, _| s.bg(over))
+                    .on_drop(move |d: &DraggedFiles, window, cx| {
+                        drop_files(d, &dest, window, Some(list.clone()));
+                        cx.stop_propagation(); // not into the folder around it too
+                    })
+            }
+            None => row,
         };
         let explorer = self.explorer.clone();
         let middle = self
@@ -1011,6 +1110,7 @@ impl Render for Explorer {
             .map(|p| p.lock().unwrap().progress.clone());
         let (can_back, can_forward) = (self.history.can_back(), self.history.can_forward());
         let in_bin = Place::of(self.history.current()) == Place::RecycleBin;
+        let drop_border = cx.theme().drag_border;
 
         let toolbar = div()
             .h_flex()
@@ -1222,6 +1322,12 @@ impl Render for Explorer {
                     .border_1()
                     .border_color(cx.theme().border)
                     .overflow_hidden()
+                    // Files dropped on the list (not on a folder row) land here.
+                    .drag_over::<DraggedFiles>(move |s, _, _, _| s.border_color(drop_border))
+                    .on_drop(cx.listener(|this, d: &DraggedFiles, window, _| {
+                        let here = this.history.current().to_path_buf();
+                        drop_files(d, &here, window, Some(this.changed.clone()))
+                    }))
                     .child(if Place::of(self.history.current()) == Place::ThisPc {
                         self.this_pc_view(cx).into_any_element()
                     } else {
