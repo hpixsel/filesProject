@@ -259,6 +259,52 @@ fn place_name(p: &Path) -> String {
     }
 }
 
+/// A column of the file list.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Col {
+    Name,
+    Size,
+    Modified,
+    Type,
+    /// Where a Recycle Bin item or a search result is from.
+    Origin,
+}
+
+impl Col {
+    /// The name its width is saved under.
+    fn key(self) -> &'static str {
+        match self {
+            Col::Name => "name",
+            Col::Size => "size",
+            Col::Modified => "modified",
+            Col::Type => "type",
+            Col::Origin => "origin",
+        }
+    }
+}
+
+/// Windows' type name for an item ("JPG File"), asked once per extension.
+fn type_of(item: &Item) -> String {
+    static NAMES: std::sync::LazyLock<Mutex<HashMap<String, String>>> =
+        std::sync::LazyLock::new(Default::default);
+    let key = if item.is_dir && item.link.is_none() {
+        "<folder>".to_string()
+    } else {
+        item.path
+            .extension()
+            .map(|e| e.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+    };
+    let mut names = NAMES.lock().unwrap();
+    names
+        .entry(key)
+        .or_insert_with(|| {
+            files_win::shell::type_name(&item.path, item.is_dir && item.link.is_none())
+                .unwrap_or_default()
+        })
+        .clone()
+}
+
 /// A drive tile in This PC.
 #[derive(Clone)]
 struct Drive {
@@ -415,6 +461,32 @@ pub struct Listing {
 }
 
 impl Listing {
+    /// The columns shown: the Recycle Bin's own, else the name and the
+    /// chosen ones (settings), plus where search results were found.
+    fn cols(&self, cx: &App) -> Vec<Col> {
+        if self.place == Place::RecycleBin {
+            return vec![Col::Name, Col::Size, Col::Modified, Col::Origin];
+        }
+        let chosen = crate::prefs::get(cx)
+            .columns
+            .iter()
+            .filter_map(|c| match c.as_str() {
+                "size" => Some(Col::Size),
+                "modified" => Some(Col::Modified),
+                "type" => Some(Col::Type),
+                _ => None,
+            });
+        let mut cols: Vec<Col> = std::iter::once(Col::Name).chain(chosen).collect();
+        if self.found {
+            cols.push(Col::Origin);
+        }
+        cols
+    }
+
+    fn col(&self, ix: usize, cx: &App) -> Col {
+        self.cols(cx).get(ix).copied().unwrap_or(Col::Name)
+    }
+
     fn apply_sort(&mut self) {
         let sizes = self.sizes.lock().unwrap();
         let (by, descending) = self.sort;
@@ -433,41 +505,50 @@ impl Listing {
 }
 
 impl TableDelegate for Listing {
-    fn columns_count(&self, _: &App) -> usize {
-        if self.place == Place::RecycleBin || self.found {
-            4
-        } else {
-            3
-        }
+    fn columns_count(&self, cx: &App) -> usize {
+        self.cols(cx).len()
     }
     fn rows_count(&self, _: &App) -> usize {
         self.items.len()
     }
-    fn column(&self, col_ix: usize, _: &App) -> Column {
+    fn column(&self, col_ix: usize, cx: &App) -> Column {
         // The header shows the order in use (sorting is ours, see perform_sort).
         let sort = |by: SortBy| match self.sort {
             (b, false) if b == by => ColumnSort::Ascending,
             (b, true) if b == by => ColumnSort::Descending,
             _ => ColumnSort::Default,
         };
-        match col_ix {
-            0 => Column::new("name", tr!("Name", "Nazwa"))
-                .width(px(440.))
+        let col = self.col(col_ix, cx);
+        // A width the user dragged, else the default.
+        let saved = crate::prefs::get(cx)
+            .widths
+            .iter()
+            .find(|(n, _)| n == col.key())
+            .map(|(_, w)| *w);
+        let width = |default: f32| px(saved.unwrap_or(default));
+        match col {
+            Col::Name => Column::new("name", tr!("Name", "Nazwa"))
+                .width(width(440.))
                 .sort(sort(SortBy::Name)),
-            1 => Column::new("size", tr!("Size", "Rozmiar"))
-                .width(px(110.))
+            Col::Size => Column::new("size", tr!("Size", "Rozmiar"))
+                .width(width(110.))
                 .sort(sort(SortBy::Size)),
-            2 if self.place == Place::RecycleBin => {
-                Column::new("modified", tr!("Deleted", "Usunięto")).width(px(160.))
+            Col::Modified if self.place == Place::RecycleBin => {
+                Column::new("modified", tr!("Deleted", "Usunięto")).width(width(160.))
             }
-            2 => Column::new("modified", tr!("Modified", "Zmodyfikowano"))
-                .width(px(160.))
+            Col::Modified => Column::new("modified", tr!("Modified", "Zmodyfikowano"))
+                .width(width(160.))
                 .sort(sort(SortBy::Modified)),
-            _ if self.found => {
-                Column::new("origin", tr!("Location", "Lokalizacja")).width(px(320.))
+            Col::Type => Column::new("type", tr!("Type", "Typ"))
+                .width(width(160.))
+                .sort(sort(SortBy::Type)),
+            Col::Origin if self.found => {
+                Column::new("origin", tr!("Location", "Lokalizacja")).width(width(320.))
             }
-            _ => Column::new("origin", tr!("Original location", "Oryginalna lokalizacja"))
-                .width(px(320.)),
+            Col::Origin => {
+                Column::new("origin", tr!("Original location", "Oryginalna lokalizacja"))
+                    .width(width(320.))
+            }
         }
     }
     /// A header click: that column ascending, descending, then back to the
@@ -479,7 +560,12 @@ impl TableDelegate for Listing {
         _: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
-        let by = [SortBy::Name, SortBy::Size, SortBy::Modified][col_ix.min(2)];
+        let by = match self.col(col_ix, cx) {
+            Col::Size => SortBy::Size,
+            Col::Modified => SortBy::Modified,
+            Col::Type => SortBy::Type,
+            Col::Name | Col::Origin => SortBy::Name,
+        };
         self.sort = match sort {
             ColumnSort::Ascending => (by, false),
             ColumnSort::Descending => (by, true),
@@ -619,8 +705,8 @@ impl TableDelegate for Listing {
             return div();
         };
         let muted = cx.theme().muted_foreground;
-        match col_ix {
-            0 => {
+        match self.col(col_ix, cx) {
+            Col::Name => {
                 let (icon, color) = item_icon(item, cx.theme().primary, muted);
                 let own = self.icons.lock().unwrap().get(&item.path).cloned();
                 let cell = div().h_flex().gap_2().child(match own {
@@ -655,7 +741,7 @@ impl TableDelegate for Listing {
                     _ => cell.child(item.name.clone()),
                 }
             }
-            1 => {
+            Col::Size => {
                 let size = match item.size {
                     _ if item.is_dir && item.link.is_some() => String::new(),
                     Some(n) => format_size(n),
@@ -666,12 +752,13 @@ impl TableDelegate for Listing {
                 };
                 div().text_color(muted).child(size)
             }
-            2 => div().text_color(muted).child(
+            Col::Type => div().text_color(muted).child(type_of(item)),
+            Col::Modified => div().text_color(muted).child(
                 item.modified
                     .map(files_win::shell::local_time)
                     .unwrap_or_default(),
             ),
-            _ => div().text_color(muted).child(
+            Col::Origin => div().text_color(muted).child(
                 item.origin
                     .as_ref()
                     .map(|o| o.display().to_string())
@@ -707,6 +794,8 @@ pub struct Explorer {
     thread_notice: Arc<Mutex<Option<String>>>,
     /// Language the column headers were built in.
     polish: bool,
+    /// The columns the table was built with (settings).
+    columns: Vec<String>,
     /// Whether this listing shows hidden files; reloads when the setting changes.
     shown_hidden: bool,
     /// This PC's drive tiles.
@@ -764,6 +853,21 @@ impl Explorer {
         cx.subscribe_in(&table, window, |this, _, ev: &TableEvent, window, cx| {
             match ev {
                 TableEvent::DoubleClickedRow(ix) => this.open_row(*ix, window, cx),
+                // A dragged column width is kept for every list.
+                TableEvent::ColumnWidthsChanged(widths) => {
+                    let cols = this.table.read(cx).delegate().cols(cx);
+                    let widths: Vec<(String, f32)> = cols
+                        .iter()
+                        .zip(widths)
+                        .map(|(c, w)| (c.key().to_string(), f32::from(*w)))
+                        .collect();
+                    crate::prefs::set(cx, |s| {
+                        for (key, w) in widths {
+                            s.widths.retain(|(k, _)| *k != key);
+                            s.widths.push((key, w));
+                        }
+                    });
+                }
                 // A plain click or arrow key: the selection becomes this row.
                 TableEvent::SelectRow(ix) => this.table.update(cx, |t, cx| {
                     let l = t.delegate_mut();
@@ -830,6 +934,7 @@ impl Explorer {
             changed,
             thread_notice: Default::default(),
             polish: i18n::polish(),
+            columns: Vec::new(),
             shown_hidden: false,
             drives: Vec::new(),
             pending_rename: None,
@@ -2320,8 +2425,10 @@ fn start_paste(dir: &Path, flag: Option<&str>) -> std::io::Result<Arc<Mutex<Past
 
 impl Render for Explorer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.polish != i18n::polish() {
+        let columns = crate::prefs::get(cx).columns.clone();
+        if self.polish != i18n::polish() || self.columns != columns {
             self.polish = i18n::polish();
+            self.columns = columns;
             self.table.update(cx, |t, cx| t.refresh(cx)); // column headers
         }
         if self.shown_hidden != crate::prefs::get(cx).show_hidden {

@@ -56,6 +56,8 @@ pub enum SortBy {
     Name,
     Size,
     Modified,
+    /// By extension (what the Type column shows).
+    Type,
 }
 
 /// Orders `items` folders first (like Explorer), then by `by`; ties and
@@ -69,14 +71,21 @@ pub fn sort_items(
 ) {
     items.sort_by_cached_key(|i| {
         let key = match by {
-            SortBy::Name => 0,
+            SortBy::Name | SortBy::Type => 0,
             SortBy::Size => size_of(i).unwrap_or(0),
             SortBy::Modified => i
                 .modified
                 .and_then(|m| m.duration_since(SystemTime::UNIX_EPOCH).ok())
                 .map_or(0, |d| d.as_secs()),
         };
-        (!i.is_dir, key, i.name.to_lowercase())
+        let ext = match by {
+            SortBy::Type => i
+                .path
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase()),
+            _ => None,
+        };
+        (!i.is_dir, key, ext, i.name.to_lowercase())
     });
     if descending {
         // Reverse within folders and within files, keeping folders first.
@@ -322,6 +331,10 @@ pub mod settings {
         pub restore_tabs: bool,
         /// Show hidden and system files, like Explorer's option.
         pub show_hidden: bool,
+        /// The list's columns after the name, in order: "size", "modified", "type".
+        pub columns: Vec<String>,
+        /// Column widths in px by column name, as last dragged.
+        pub widths: Vec<(String, f32)>,
     }
 
     impl Default for Settings {
@@ -334,6 +347,8 @@ pub mod settings {
                 polish: None,
                 restore_tabs: true,
                 show_hidden: false,
+                columns: vec!["size".into(), "modified".into(), "type".into()],
+                widths: Vec::new(),
             }
         }
     }
@@ -360,6 +375,26 @@ pub mod settings {
                 "lang" => s.polish = Some(value == "pl"),
                 "restore_tabs" => s.restore_tabs = value != "false",
                 "show_hidden" => s.show_hidden = value == "true",
+                "columns" => {
+                    s.columns = value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|c| ["size", "modified", "type"].contains(c))
+                        .map(String::from)
+                        .collect()
+                }
+                "widths" => {
+                    s.widths = value
+                        .split(',')
+                        .filter_map(|w| w.split_once(':'))
+                        .filter_map(|(n, w)| {
+                            Some((
+                                n.trim().to_string(),
+                                w.trim().parse::<f32>().ok()?.clamp(40., 2000.),
+                            ))
+                        })
+                        .collect()
+                }
                 "fonts" => {
                     let n: Vec<f32> = value.split(' ').filter_map(|v| v.parse().ok()).collect();
                     if let [a, b, c] = n[..] {
@@ -382,6 +417,9 @@ pub mod settings {
             s.dark, s.density, s.restore_tabs
         );
         text += &format!("show_hidden={}\r\n", s.show_hidden);
+        text += &format!("columns={}\r\n", s.columns.join(","));
+        let widths: Vec<String> = s.widths.iter().map(|(n, w)| format!("{n}:{w}")).collect();
+        text += &format!("widths={}\r\n", widths.join(","));
         let [a, b, c] = s.fonts;
         text += &format!("fonts={a} {b} {c}\r\n");
         if let Some(pl) = s.polish {
@@ -417,6 +455,8 @@ pub mod settings {
                 polish: Some(true),
                 restore_tabs: false,
                 show_hidden: true,
+                columns: vec!["type".into(), "size".into()],
+                widths: vec![("name".into(), 300.), ("type".into(), 120.5)],
             };
             assert_eq!(parse(&to_text(&s)), s);
             let w = Settings {

@@ -493,6 +493,33 @@ pub fn link_target(link: &Path) -> Option<PathBuf> {
     (end > 0).then(|| PathBuf::from(String::from_utf16_lossy(&buf[..end])))
 }
 
+/// Windows' name for a file's type ("JPG File", "File folder"), from its
+/// name alone: the disk is not touched.
+pub fn type_name(path: &Path, is_dir: bool) -> Option<String> {
+    use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL};
+    use windows::Win32::UI::Shell::{
+        SHGetFileInfoW, SHFILEINFOW, SHGFI_TYPENAME, SHGFI_USEFILEATTRIBUTES,
+    };
+    let attrs = if is_dir {
+        FILE_ATTRIBUTE_DIRECTORY
+    } else {
+        FILE_ATTRIBUTE_NORMAL
+    };
+    let mut info = SHFILEINFOW::default();
+    // SAFETY: a NUL-terminated path and an output struct of the given size.
+    let ok = unsafe {
+        SHGetFileInfoW(
+            &HSTRING::from(path.as_os_str()),
+            attrs,
+            Some(&mut info),
+            std::mem::size_of::<SHFILEINFOW>() as u32,
+            SHGFI_TYPENAME | SHGFI_USEFILEATTRIBUTES,
+        )
+    };
+    let end = info.szTypeName.iter().position(|&c| c == 0).unwrap_or(0);
+    (ok != 0 && end > 0).then(|| String::from_utf16_lossy(&info.szTypeName[..end]))
+}
+
 /// Pixels of the picture Windows shows for `path`, as (width, height,
 /// top-down BGRA): its icon, or with `thumbnail` its preview (a photo, a
 /// PDF page, a video frame), `None` when it has none. Can be slow: call it
@@ -565,6 +592,12 @@ pub fn shell_image(path: &Path, size: i32, thumbnail: bool) -> Option<(u32, u32,
 #[cfg(test)]
 mod image_tests {
     use super::*;
+
+    #[test]
+    fn type_names() {
+        assert!(type_name(Path::new("x.txt"), false).is_some_and(|t| !t.is_empty()));
+        assert!(type_name(Path::new("folder"), true).is_some());
+    }
 
     #[test]
     fn icon_of_a_program() {
