@@ -19,7 +19,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-actions!(files, [GoBack, GoForward, GoUp, Refresh, PasteHere]);
+actions!(
+    files,
+    [
+        GoBack,
+        GoForward,
+        GoUp,
+        Refresh,
+        PasteHere,
+        CopySel,
+        CutSel,
+        DeleteSel,
+        DeleteForever,
+        OpenSel
+    ]
+);
 
 const CONTEXT: &str = "Explorer";
 
@@ -30,6 +44,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-up", GoUp, Some(CONTEXT)),
         KeyBinding::new("f5", Refresh, Some(CONTEXT)),
         KeyBinding::new("ctrl-v", PasteHere, Some(CONTEXT)),
+        KeyBinding::new("ctrl-c", CopySel, Some(CONTEXT)),
+        KeyBinding::new("ctrl-x", CutSel, Some(CONTEXT)),
+        KeyBinding::new("delete", DeleteSel, Some(CONTEXT)),
+        KeyBinding::new("shift-delete", DeleteForever, Some(CONTEXT)),
+        KeyBinding::new("enter", OpenSel, Some(CONTEXT)),
     ]);
 }
 
@@ -157,6 +176,8 @@ pub struct Explorer {
     /// Set when a paste stopped because files already exist; asks what to do.
     conflict: Option<SharedString>,
     changed: Arc<AtomicBool>,
+    /// Outcome of a file operation finished on another thread.
+    thread_notice: Arc<Mutex<Option<String>>>,
     accent: usize,
     focus: FocusHandle,
 }
@@ -220,6 +241,7 @@ impl Explorer {
             scan: None,
             conflict: None,
             changed,
+            thread_notice: Default::default(),
             accent: 0,
             focus: cx.focus_handle(),
         };
@@ -294,8 +316,83 @@ impl Explorer {
         self.load(window, cx);
     }
 
-    fn paste_here(&mut self, _: &PasteHere, _: &mut Window, cx: &mut Context<Self>) {
-        self.start(None, cx);
+    /// Ctrl+V: real paths (Explorer copy, NanaZip, our Ctrl+C/X) go to
+    /// Windows' file engine; virtual files (RDP, zip contents) to rdppaste.
+    fn paste_here(&mut self, _: &PasteHere, window: &mut Window, cx: &mut Context<Self>) {
+        if !files_win::fileop::clipboard_has_paths() {
+            self.start(None, cx);
+            return;
+        }
+        let Some(h) = hwnd(window) else { return };
+        let dir = self.history.current().to_path_buf();
+        let report = self.report_done("Paste");
+        files_win::fileop::paste_paths(h, dir, report);
+    }
+
+    fn selected(&self, cx: &App) -> Option<Item> {
+        let table = self.table.read(cx);
+        let ix = table.selected_row()?;
+        table.delegate().items.get(ix).cloned()
+    }
+
+    fn copy_selected(&mut self, cut: bool, cx: &mut Context<Self>) {
+        let Some(item) = self.selected(cx) else {
+            return;
+        };
+        let result = files_win::Sta::new()
+            .and_then(|sta| files_win::fileop::set_clipboard(&sta, &item.path, cut));
+        self.notice = match result {
+            Ok(()) if cut => format!("Cut {}", item.name).into(),
+            Ok(()) => format!("Copied {}", item.name).into(),
+            Err(e) => format!("Cannot copy: {e}").into(),
+        };
+        cx.notify();
+    }
+
+    fn copy_sel(&mut self, _: &CopySel, _: &mut Window, cx: &mut Context<Self>) {
+        self.copy_selected(false, cx);
+    }
+    fn cut_sel(&mut self, _: &CutSel, _: &mut Window, cx: &mut Context<Self>) {
+        self.copy_selected(true, cx);
+    }
+
+    fn delete_selected(&mut self, permanent: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(item), Some(h)) = (self.selected(cx), hwnd(window)) else {
+            return;
+        };
+        let report = self.report_done("Delete");
+        files_win::fileop::delete(h, item.path, permanent, report);
+    }
+
+    fn delete_sel(&mut self, _: &DeleteSel, window: &mut Window, cx: &mut Context<Self>) {
+        self.delete_selected(false, window, cx);
+    }
+    fn delete_forever(&mut self, _: &DeleteForever, window: &mut Window, cx: &mut Context<Self>) {
+        self.delete_selected(true, window, cx);
+    }
+
+    fn open_sel(&mut self, _: &OpenSel, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self.table.read(cx).selected_row() {
+            self.open_row(ix, window, cx);
+        }
+    }
+
+    /// Callback for a file operation running on its own thread: records the
+    /// outcome and asks the next poll to reload the folder.
+    fn report_done(
+        &self,
+        what: &'static str,
+    ) -> impl FnOnce(files_win::Result<()>) + Send + 'static {
+        let (changed, notice) = (self.changed.clone(), self.thread_notice.clone());
+        move |r| {
+            // A cancelled Windows dialog returns an error too; say so plainly.
+            let text = match r {
+                Ok(()) => format!("{what} done"),
+                Err(e) => format!("{what} did not finish: {e}"),
+            };
+            *notice.lock().unwrap() = Some(text);
+            changed.store(true, Ordering::SeqCst);
+        }
     }
 
     /// `flag` is the conflict choice (`--overwrite`, `--skip`, `--rename`),
@@ -326,6 +423,9 @@ impl Explorer {
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.changed.swap(false, Ordering::SeqCst) {
             self.load(window, cx);
+        }
+        if let Some(text) = self.thread_notice.lock().unwrap().take() {
+            self.notice = text.into();
         }
         if self.scan.is_some() {
             // Repaint the size column as folder sizes arrive.
@@ -576,6 +676,11 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::go_up))
             .on_action(cx.listener(Self::refresh))
             .on_action(cx.listener(Self::paste_here))
+            .on_action(cx.listener(Self::copy_sel))
+            .on_action(cx.listener(Self::cut_sel))
+            .on_action(cx.listener(Self::delete_sel))
+            .on_action(cx.listener(Self::delete_forever))
+            .on_action(cx.listener(Self::open_sel))
             .text_color(cx.theme().foreground)
             .child(TitleBar::new().child(div().pl_2().child("FilesProject")))
             .child(toolbar)
