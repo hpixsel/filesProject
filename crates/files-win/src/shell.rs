@@ -515,13 +515,11 @@ pub fn shell_image(path: &Path, size: i32, thumbnail: bool) -> Option<(u32, u32,
             SHCreateItemFromParsingName(&HSTRING::from(path.as_os_str()), None).ok()?;
         let factory: IShellItemImageFactory = item.cast().ok()?;
         let kind = if thumbnail {
-            SIIGBF_THUMBNAILONLY
+            SIIGBF_THUMBNAILONLY // at most `size`: a photo would come whole
         } else {
-            SIIGBF_ICONONLY
+            SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK
         };
-        let bitmap = factory
-            .GetImage(SIZE { cx: size, cy: size }, kind | SIIGBF_BIGGERSIZEOK)
-            .ok()?;
+        let bitmap = factory.GetImage(SIZE { cx: size, cy: size }, kind).ok()?;
         let mut bm = BITMAP::default();
         let got = GetObjectW(
             bitmap,

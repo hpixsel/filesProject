@@ -1911,10 +1911,12 @@ impl Render for Explorer {
             )
             .child(div().pt_2().child(status))
             .children(self.preview.as_ref().map(|p| {
-                // Shown at its pixel size, beside the pointer, kept on screen.
+                // Beside the pointer, kept on screen.
                 let scale = window.scale_factor();
                 let size = p.image.size(0);
-                let (w, h) = (size.width.0 as f32 / scale, size.height.0 as f32 / scale);
+                // Fit in 320 x 320 logical px, keeping the shape.
+                let fit = (320. * scale / size.width.0.max(size.height.0) as f32).min(1.) / scale;
+                let (w, h) = (size.width.0 as f32 * fit, size.height.0 as f32 * fit);
                 deferred(
                     anchored()
                         .position(p.at + point(px(16.), px(16.)))
