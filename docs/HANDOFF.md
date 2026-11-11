@@ -75,11 +75,22 @@ These are from `docs/designs/files_project_m0.md`:
         `Preferred DropEffect`, `CanIncludeInClipboardHistory` and
         `CanUploadToCloudClipboard`. There is no `CF_HDROP` and no
         `Shell IDList Array`, so the client offers only virtual files.
+    *   **Follow-up runs (owner, 2026-11-11):**
+        *   **218 MiB file (buffered path):** done, exit code 0. Pasting
+            again without `--overwrite` was refused.
+        *   **Cancel during `--overwrite` at 8%:** exit code 2, "0/1 files
+            completed". The original file was untouched (same size, the
+            server's modified time kept) and no `.partial` was left.
+        *   **1,118 MiB file (unbuffered `NO_BUFFERING` path, above
+            `LARGE_FILE`):** done, exit code 0. The file checks out by
+            eye.
+        *   **Responsiveness:** the owner noticed no stutter while copying.
+            G2 has not been measured with `typeperf` yet.
     *   **Still to test:**
-        *   a large file of several GB (CUJ 1, G2);
-        *   a folder tree with cancel (CUJ 2);
         *   a session drop (CUJ 6);
-        *   the Q6 cases.
+        *   the Q6 cases;
+        *   the G2 `typeperf` measurement;
+        *   the Q1 baseline.
 *   **Q1 baseline:** to do.
 *   **Q6 cases:** to do.
 

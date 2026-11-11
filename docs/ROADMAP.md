@@ -9,7 +9,8 @@ Each milestone gets its own design document in `docs/designs/`.
 - [x] P3: `files-jobs` (job runner, paste job, end-to-end tests)
 - [x] P4: `rdppaste` command line
 - [x] P5: documentation (handoff, architecture, test procedure, ADRs)
-- [ ] Manual RDP run: CUJ 1, 2, 3 and 6, and the Q6 cases, on a real server
+- [x] Manual RDP run: CUJ 1, 2 and 3 on a real server (2026-11-11)
+- [ ] CUJ 6 (session drop) and the Q6 cases
 - [ ] G2 measured with `typeperf`; Q1 freeze baseline recorded
 
 ## M1: first window
