@@ -21,11 +21,17 @@ pub fn list_dir(dir: &Path) -> io::Result<Vec<Item>> {
         .filter_map(Result::ok)
         .filter_map(|e| {
             let meta = e.metadata().ok()?;
+            // Junctions such as "Documents and Settings" are reparse points
+            // that std reports as symlinks, not dirs; the attribute says dir.
+            let is_dir = meta.is_dir() || {
+                use std::os::windows::fs::MetadataExt;
+                meta.file_attributes() & 0x10 != 0 // FILE_ATTRIBUTE_DIRECTORY
+            };
             Some(Item {
                 name: e.file_name().to_string_lossy().into_owned(),
                 path: e.path(),
-                is_dir: meta.is_dir(),
-                size: (!meta.is_dir()).then_some(meta.len()),
+                is_dir,
+                size: (!is_dir).then_some(meta.len()),
                 modified: meta.modified().ok(),
             })
         })
