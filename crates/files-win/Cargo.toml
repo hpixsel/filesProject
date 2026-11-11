@@ -27,6 +27,8 @@ features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_System_LibraryLoader",
     "Win32_System_Time",
+    "Win32_System_JobObjects",
+    "Win32_Security",
 ]
 
 [features]

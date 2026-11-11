@@ -353,6 +353,10 @@ fn start_paste(dir: &Path, flag: Option<&str>) -> std::io::Result<Arc<Mutex<Past
         .stderr(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()?;
+    // If the window crashes, Windows ends the paste too (Q8).
+    if let Err(e) = files_win::process::kill_with_parent(&child) {
+        eprintln!("rdppaste will not stop with the window: {e}");
+    }
     let state = Arc::new(Mutex::new(Paste {
         stdin: child.stdin.take(),
         ..Paste::default()
