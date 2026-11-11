@@ -88,24 +88,43 @@ fn list(dir: &Path) -> std::io::Result<Vec<Item>> {
     Ok(match Place::of(dir) {
         Place::Folder => return list_dir(dir),
         Place::RecycleBin => places::recycle_bin(&drives()),
-        Place::ThisPc => drives()
-            .into_iter()
-            .map(|root| {
-                let letter = root.display().to_string();
-                let label = files_win::shell::network_path(&root)
-                    .or_else(|| files_win::shell::volume_label(&root))
-                    .unwrap_or_else(|| tr!("Local Disk", "Dysk lokalny"));
-                Item {
-                    name: format!("{label} ({})", letter.trim_end_matches('\\')),
-                    size: files_win::io::free_bytes(&root).ok(),
-                    path: root,
-                    is_dir: true,
-                    modified: None,
-                    origin: None,
-                }
-            })
-            .collect(),
+        Place::ThisPc => Vec::new(), // drive tiles instead, see `this_pc`
     })
+}
+
+/// A drive tile in This PC.
+#[derive(Clone)]
+struct Drive {
+    root: PathBuf,
+    name: String,
+    network: bool,
+    /// (free, total) bytes; `None` when the drive does not answer.
+    space: Option<(u64, u64)>,
+}
+
+/// The drives for This PC, local ones first. Off the UI thread: a network
+/// drive can take seconds to answer.
+fn this_pc() -> Vec<Drive> {
+    let mut drives: Vec<Drive> = files_win::shell::drives()
+        .into_iter()
+        .map(|root| {
+            let share = files_win::shell::network_path(&root);
+            let label = share
+                .as_deref()
+                .and_then(|s| s.rsplit('\\').next().map(str::to_string))
+                .or_else(|| files_win::shell::volume_label(&root))
+                .unwrap_or_else(|| tr!("Local Disk", "Dysk lokalny"));
+            let letter = root.display().to_string();
+            Drive {
+                name: format!("{label} ({})", letter.trim_end_matches('\\')),
+                network: share.is_some(),
+                space: files_win::io::disk_space(&root).ok(),
+                root,
+            }
+        })
+        .collect();
+    drives.sort_by_key(|d| d.network);
+    drives
 }
 
 /// Icon file (in `assets/icons`) and hue for a file or folder, from its
@@ -205,9 +224,6 @@ impl TableDelegate for Listing {
     fn column(&self, col_ix: usize, _: &App) -> Column {
         match col_ix {
             0 => Column::new("name", tr!("Name", "Nazwa")).width(px(440.)),
-            1 if self.place == Place::ThisPc => {
-                Column::new("size", tr!("Free", "Wolne")).width(px(110.))
-            }
             1 => Column::new("size", tr!("Size", "Rozmiar")).width(px(110.)),
             2 if self.place == Place::RecycleBin => {
                 Column::new("modified", tr!("Deleted", "Usunięto")).width(px(160.))
@@ -355,6 +371,8 @@ pub struct Explorer {
     thread_notice: Arc<Mutex<Option<String>>>,
     /// Language the column headers were built in.
     polish: bool,
+    /// This PC's drive tiles.
+    drives: Vec<Drive>,
     focus: FocusHandle,
 }
 
@@ -438,6 +456,7 @@ impl Explorer {
             changed,
             thread_notice: Default::default(),
             polish: i18n::polish(),
+            drives: Vec::new(),
             focus: cx.focus_handle(),
         };
         this.load(window, cx);
@@ -452,6 +471,30 @@ impl Explorer {
         self.status = tr!("Loading…", "Wczytywanie…").into();
         cx.notify();
         let place = Place::of(&dir);
+        if place == Place::ThisPc {
+            // The hidden table must not keep the last folder's selection, or
+            // Delete here would act on files nobody can see.
+            self.scan = None;
+            self.table.update(cx, |t, cx| {
+                let l = t.delegate_mut();
+                l.items.clear();
+                l.marked.clear();
+                l.anchor = None;
+                l.place = place;
+                t.refresh(cx);
+            });
+            let task = cx.background_spawn(async move { this_pc() });
+            cx.spawn_in(window, async move |this, cx| {
+                let drives = task.await;
+                let _ = this.update(cx, |this, cx| {
+                    this.status = tr!("{} items", "Elementów: {}", drives.len()).into();
+                    this.drives = drives;
+                    cx.notify();
+                });
+            })
+            .detach();
+            return;
+        }
         let task = cx.background_spawn(async move { list(&dir) });
         cx.spawn_in(window, async move |this, cx| {
             let listed = task.await;
@@ -597,6 +640,111 @@ impl Explorer {
     }
     fn delete_forever(&mut self, _: &DeleteForever, window: &mut Window, cx: &mut Context<Self>) {
         self.delete_selected(true, window, cx);
+    }
+
+    /// This PC like Explorer's: drive tiles with a usage bar, local drives
+    /// and network locations apart.
+    fn this_pc_view(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let t = cx.theme();
+        let (muted, primary, hover, track, radius) = (
+            t.muted_foreground,
+            t.primary,
+            t.table_hover,
+            t.muted,
+            t.radius,
+        );
+        let danger = t.danger;
+        let tile = |ix: usize, d: &Drive, cx: &mut Context<Self>| {
+            let (root, middle) = (d.root.clone(), d.root.clone());
+            let caption = match d.space {
+                Some((free, total)) => tr!(
+                    "{} free of {}",
+                    "{} wolne z {}",
+                    format_size(free),
+                    format_size(total)
+                ),
+                None => tr!("Not available", "Niedostępny"),
+            };
+            let bar = d
+                .space
+                .filter(|&(_, total)| total > 0)
+                .map(|(free, total)| {
+                    let used = 1. - free as f32 / total as f32;
+                    // Red when nearly full, like Explorer.
+                    let fill = if used > 0.9 { danger } else { primary };
+                    div()
+                        .h(px(6.))
+                        .w_full()
+                        .rounded_full()
+                        .bg(track)
+                        .child(div().h_full().rounded_full().bg(fill).w(relative(used)))
+                });
+            let icon = if d.network {
+                IconName::Network
+            } else {
+                IconName::HardDrive
+            };
+            div()
+                .id(("drive", ix))
+                .w(px(260.))
+                .p_2()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_3()
+                .rounded(radius)
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .child(
+                    Icon::new(icon)
+                        .with_size(gpui_kit::component::Size::Large)
+                        .text_color(if d.space.is_some() { primary } else { muted }),
+                )
+                .child(
+                    div()
+                        .v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .child(div().truncate().child(d.name.clone()))
+                        .children(bar)
+                        .child(div().text_xs().text_color(muted).child(caption)),
+                )
+                .on_click(cx.listener(move |this, _, w, cx| this.go_to(root.clone(), w, cx)))
+                .on_mouse_down(
+                    MouseButton::Middle,
+                    cx.listener(move |_, _, _, cx| cx.emit(OpenInNewTab(middle.clone()))),
+                )
+        };
+        let mut view = div()
+            .id("this-pc")
+            .size_full()
+            .overflow_y_scroll()
+            .p_3()
+            .v_flex()
+            .gap_1();
+        for (network, title) in [
+            (false, tr!("Devices and drives", "Urządzenia i dyski")),
+            (true, tr!("Network locations", "Lokalizacje sieciowe")),
+        ] {
+            let mut row = div().flex().flex_row().flex_wrap().gap_2();
+            let mut any = false;
+            for (ix, d) in self
+                .drives
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| d.network == network)
+            {
+                row = row.child(tile(ix, d, cx));
+                any = true;
+            }
+            if any {
+                view = view
+                    .child(div().pt_2().text_sm().text_color(muted).child(title))
+                    .child(row);
+            }
+        }
+        view
     }
 
     /// Recycle Bin: puts the selected items back where they were deleted from.
@@ -1074,7 +1222,13 @@ impl Render for Explorer {
                     .border_1()
                     .border_color(cx.theme().border)
                     .overflow_hidden()
-                    .child(DataTable::new(&self.table).with_size(theme::table_size())),
+                    .child(if Place::of(self.history.current()) == Place::ThisPc {
+                        self.this_pc_view(cx).into_any_element()
+                    } else {
+                        DataTable::new(&self.table)
+                            .with_size(theme::table_size())
+                            .into_any_element()
+                    }),
             )
             .child(div().pt_2().child(status))
     }
