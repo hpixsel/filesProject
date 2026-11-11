@@ -562,9 +562,12 @@ otherwise.
     *   new crates `files-app` (view state, no UI types) and
         `files-ui-<toolkit>` (thin rendering);
     *   UI toolkit chosen after M0 and recorded as an ADR (Architecture
-        Decision Record, a short file in `docs/adr/`). eframe/egui is the
-        first candidate. The M1 ADR also checks that Slint's licence fits
-        an MIT repository;
+        Decision Record, a short file in `docs/adr/`).
+        *   GPUI + gpui-kit is the first candidate, because it looks the
+            most modern and has ready tabs, docks, and a virtual table.
+        *   eframe/egui is the fallback.
+        *   A 1–2 day spike measures both on Windows, as described in
+            `docs/research/ui-toolkit-2026-11.md`;
     *   a single-pane list;
     *   Ctrl+V starts a paste, one at a time. The direction is a child
         `rdppaste` process. Queueing and the details are decided in the M1
@@ -689,8 +692,13 @@ otherwise.
         (estimate), which conflicts with G2. Its drag-and-drop handles file
         paths only, and the COM code is needed anyway.
     *   WinUI 3: no official Rust support.
-*   **Reason for Rejection**: resource budget and support. The M1 toolkit
-    decision is between eframe/egui, Slint and iced.
+*   **Reason for Rejection**: resource budget and support.
+*   **Update (2026-11-11):** Microsoft now has an official preview,
+    `windows-reactor` in windows-rs. It is still a preview with a baseline
+    of about 100 MB, so it is not a candidate, but it is worth watching.
+*   **M1 toolkit decision:** GPUI + gpui-kit as the first choice, with
+    eframe/egui as the fallback, settled by a 1–2 day spike. See
+    `docs/research/ui-toolkit-2026-11.md`.
 
 ### Alternative H: `jwalk` for folder size scanning (M2)
 
