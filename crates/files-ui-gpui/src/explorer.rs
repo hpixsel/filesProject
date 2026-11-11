@@ -46,7 +46,8 @@ actions!(
         ClearSelection,
         Properties,
         ToggleHidden,
-        ToggleGrid
+        ToggleGrid,
+        Search
     ]
 );
 
@@ -162,6 +163,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-enter", Properties, Some(CONTEXT)),
         KeyBinding::new("ctrl-h", ToggleHidden, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-g", ToggleGrid, Some(CONTEXT)),
+        KeyBinding::new("ctrl-f", Search, Some(CONTEXT)),
     ]);
 }
 
@@ -381,6 +383,11 @@ pub struct Listing {
     renaming: Option<(PathBuf, Entity<InputState>)>,
     /// Set when a right-click hit a row, so the folder's menu stays shut.
     row_menu: Arc<AtomicBool>,
+    /// Every item of the folder; `items` is what the search filter lets
+    /// through (or the results of a search in subfolders).
+    all: Vec<Item>,
+    /// `items` are search results from subfolders: a Location column shows.
+    found: bool,
     /// The column order chosen in the header (kept across folders).
     sort: (SortBy, bool),
 }
@@ -405,7 +412,7 @@ impl Listing {
 
 impl TableDelegate for Listing {
     fn columns_count(&self, _: &App) -> usize {
-        if self.place == Place::RecycleBin {
+        if self.place == Place::RecycleBin || self.found {
             4
         } else {
             3
@@ -434,6 +441,9 @@ impl TableDelegate for Listing {
             2 => Column::new("modified", tr!("Modified", "Zmodyfikowano"))
                 .width(px(160.))
                 .sort(sort(SortBy::Modified)),
+            _ if self.found => {
+                Column::new("origin", tr!("Location", "Lokalizacja")).width(px(320.))
+            }
             _ => Column::new("origin", tr!("Original location", "Oryginalna lokalizacja"))
                 .width(px(320.)),
         }
@@ -683,6 +693,10 @@ pub struct Explorer {
     pending_rename: Option<PathBuf>,
     /// The address shows as clickable crumbs; this is true while it is typed in.
     editing_address: bool,
+    /// The search field (Ctrl+F) while it is open.
+    search: Option<Entity<InputState>>,
+    /// Stops a search in subfolders that is still running.
+    search_stop: Arc<AtomicBool>,
     /// Watches the folder on disk; `dirty` is set when it changes.
     watch: Option<files_win::watch::Watch>,
     dirty: Arc<AtomicBool>,
@@ -714,6 +728,8 @@ impl Explorer {
             renaming: None,
             row_menu: Default::default(),
             sort: Default::default(),
+            all: Vec::new(),
+            found: false,
         };
         // Ctrl/Shift+click is ours (Listing::marked), not the table's single row.
         let table =
@@ -793,6 +809,8 @@ impl Explorer {
             drives: Vec::new(),
             pending_rename: None,
             editing_address: false,
+            search: None,
+            search_stop: Default::default(),
             watch: None,
             dirty: Default::default(),
             last_reload: std::time::Instant::now(),
@@ -815,6 +833,13 @@ impl Explorer {
         self.status = tr!("Loading…", "Wczytywanie…").into();
         cx.notify();
         let place = Place::of(&dir);
+        // A new folder ends a running search in subfolders.
+        self.search_stop.store(true, Ordering::SeqCst);
+        let filter = self
+            .search
+            .as_ref()
+            .map(|i| i.read(cx).value().trim().to_lowercase())
+            .unwrap_or_default();
         self.last_reload = std::time::Instant::now();
         // Reloads when the folder changes on disk (folders only, not places).
         self.watch = (place == Place::Folder)
@@ -901,6 +926,11 @@ impl Explorer {
                                 }
                             }
                             l.anchor = None;
+                            l.all = l.items.clone();
+                            l.found = false;
+                            if !filter.is_empty() {
+                                l.items.retain(|i| i.name.to_lowercase().contains(&filter));
+                            }
                             l.apply_sort();
                             l.marked = (0..l.items.len())
                                 .filter(|&i| kept.contains(&l.items[i].path))
@@ -1589,6 +1619,166 @@ impl Explorer {
         bar
     }
 
+    /// Ctrl+F: a search field. Typing filters this folder; Enter also
+    /// searches its subfolders.
+    fn search(&mut self, _: &Search, window: &mut Window, cx: &mut Context<Self>) {
+        let input = match &self.search {
+            Some(i) => i.clone(),
+            None => {
+                let input = cx.new(|cx| {
+                    InputState::new(window, cx).placeholder(tr!(
+                        "Search (Enter: subfolders too)",
+                        "Szukaj (Enter: też w podfolderach)"
+                    ))
+                });
+                cx.subscribe_in(
+                    &input,
+                    window,
+                    |this, input, ev: &InputEvent, window, cx| match ev {
+                        InputEvent::Change => {
+                            let text = input.read(cx).value().to_string();
+                            this.filter(&text, cx);
+                        }
+                        InputEvent::PressEnter { .. } => {
+                            let text = input.read(cx).value().trim().to_string();
+                            this.search_subfolders(text, window, cx);
+                        }
+                        _ => {}
+                    },
+                )
+                .detach();
+                self.search = Some(input.clone());
+                input
+            }
+        };
+        input.update(cx, |i, cx| {
+            i.focus(window, cx);
+            i.select_all(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Shows only the items whose name contains `text` (any case).
+    fn filter(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.search_stop.store(true, Ordering::SeqCst);
+        let text = text.trim().to_lowercase();
+        self.table.update(cx, |t, cx| {
+            let l = t.delegate_mut();
+            l.found = false;
+            l.items = l
+                .all
+                .iter()
+                .filter(|i| i.name.to_lowercase().contains(&text))
+                .cloned()
+                .collect();
+            l.marked.clear();
+            l.anchor = None;
+            l.apply_sort();
+            t.refresh(cx);
+            t.clear_selection(cx);
+        });
+        let n = self.table.read(cx).delegate().items.len();
+        self.status = tr!("{} items", "Elementów: {}", n).into();
+        cx.notify();
+    }
+
+    /// Enter in the search field: names containing `text` in this folder and
+    /// every folder below it, found in the background and shown as they
+    /// come (at most 5,000).
+    fn search_subfolders(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.history.current().to_path_buf();
+        if text.is_empty() || Place::of(&root) != Place::Folder {
+            return;
+        }
+        self.search_stop.store(true, Ordering::SeqCst);
+        let stop = Arc::new(AtomicBool::new(false));
+        self.search_stop = stop.clone();
+        let show_hidden = crate::prefs::get(cx).show_hidden;
+        self.table.update(cx, |t, cx| {
+            let l = t.delegate_mut();
+            l.found = true;
+            l.items.clear();
+            l.marked.clear();
+            t.refresh(cx);
+        });
+        self.status = tr!("Searching…", "Szukanie…").into();
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<Item>>();
+        let needle = text.to_lowercase();
+        let walking = stop.clone();
+        cx.background_spawn(async move {
+            let mut queue = vec![root];
+            let mut count = 0;
+            while let Some(dir) = queue.pop() {
+                if walking.load(Ordering::SeqCst) || count >= 5_000 {
+                    break;
+                }
+                let Ok(items) = list_dir(&dir, show_hidden) else {
+                    continue;
+                };
+                let mut hits = Vec::new();
+                for mut i in items {
+                    if i.is_dir {
+                        queue.push(i.path.clone());
+                    }
+                    if i.name.to_lowercase().contains(&needle) {
+                        i.origin = Some(dir.clone());
+                        hits.push(i);
+                    }
+                }
+                count += hits.len();
+                if !hits.is_empty() && tx.send(hits).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.spawn_in(window, async move |this, cx| loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(200))
+                .await;
+            let mut batch = Vec::new();
+            let mut done = false;
+            loop {
+                match rx.try_recv() {
+                    Ok(b) => batch.extend(b),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        done = true;
+                        break;
+                    }
+                }
+            }
+            let alive = this.update(cx, |this, cx| {
+                if stop.load(Ordering::SeqCst) {
+                    return false;
+                }
+                this.table.update(cx, |t, cx| {
+                    t.delegate_mut().items.extend(batch);
+                    t.refresh(cx);
+                });
+                let n = this.table.read(cx).delegate().items.len();
+                this.status = if done {
+                    tr!("Found {n}", "Znaleziono: {n}").into()
+                } else {
+                    tr!("Searching… {n} found", "Szukanie… znaleziono: {n}").into()
+                };
+                cx.notify();
+                true
+            });
+            if done || !matches!(alive, Ok(true)) {
+                return;
+            }
+        })
+        .detach();
+    }
+
+    /// Esc in the search field: the whole folder again.
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search = None;
+        self.filter("", cx);
+        self.focus.focus(window, cx);
+    }
+
     /// Esc while renaming: the old name stays.
     fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.table.update(cx, |t, cx| {
@@ -1848,7 +2038,9 @@ impl Explorer {
         }
         // The folder changed on disk: reload, at most once a second, so a
         // copy of thousands of files does not reload thousands of times.
+        // Not while search results from subfolders are shown.
         if self.last_reload.elapsed() > Duration::from_secs(1)
+            && !self.table.read(cx).delegate().found
             && self.dirty.swap(false, Ordering::SeqCst)
         {
             self.load(window, cx);
@@ -2070,6 +2262,19 @@ impl Render for Explorer {
                     .tooltip(tr!("Refresh (F5)", "Odśwież (F5)"))
                     .on_click(cx.listener(|this, _, w, cx| this.refresh(&Refresh, w, cx))),
             )
+            .children(self.search.clone().map(|input| {
+                let me = cx.weak_entity();
+                div()
+                    .w(px(240.))
+                    // Esc closes the search and shows the whole folder again.
+                    .on_key_down(move |e: &KeyDownEvent, window, cx| {
+                        if e.keystroke.key == "escape" {
+                            let _ = me.update(cx, |this, cx| this.close_search(window, cx));
+                            cx.stop_propagation();
+                        }
+                    })
+                    .child(Input::new(&input).prefix(Icon::new(IconName::Search).xsmall()))
+            }))
             .child(if self.editing_address {
                 let me = cx.weak_entity();
                 div()
@@ -2256,6 +2461,7 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::clear_selection))
             .on_action(cx.listener(Self::properties))
             .on_action(cx.listener(Self::toggle_grid))
+            .on_action(cx.listener(Self::search))
             .on_action(cx.listener(|_, _: &ToggleHidden, _, cx| {
                 crate::prefs::set(cx, |s| s.show_hidden = !s.show_hidden)
             }))
