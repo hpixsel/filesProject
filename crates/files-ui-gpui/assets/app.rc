@@ -1,0 +1,2 @@
+// Icon 1: GPUI loads resource 1 as the window icon; Explorer shows it for the .exe.
+1 ICON "app.ico"

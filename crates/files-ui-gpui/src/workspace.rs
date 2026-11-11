@@ -581,7 +581,18 @@ impl Render for Workspace {
             .collect();
         let title =
             TitleBar::new()
-                .child(div().pl_2().child("FilesProject"))
+                // gpui-kit already indents 12 px; the logo sits in it, no extra padding.
+                .child(
+                    div()
+                        .h_flex()
+                        .gap_2()
+                        .child(
+                            Icon::empty()
+                                .path("icons/app.svg")
+                                .text_color(cx.theme().primary),
+                        )
+                        .child("FilesProject"),
+                )
                 .child(
                     div()
                         .h_flex()
