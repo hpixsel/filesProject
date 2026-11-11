@@ -48,7 +48,11 @@ actions!(
         Properties,
         ToggleHidden,
         ToggleGrid,
-        Search
+        Search,
+        GridLeft,
+        GridRight,
+        GridUp,
+        GridDown
     ]
 );
 
@@ -165,6 +169,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-h", ToggleHidden, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-g", ToggleGrid, Some(CONTEXT)),
         KeyBinding::new("ctrl-f", Search, Some(CONTEXT)),
+        // The thumbnail grid moves in two directions.
+        KeyBinding::new("left", GridLeft, Some("Grid")),
+        KeyBinding::new("right", GridRight, Some("Grid")),
+        KeyBinding::new("up", GridUp, Some("Grid")),
+        KeyBinding::new("down", GridDown, Some("Grid")),
     ]);
 }
 
@@ -716,6 +725,9 @@ pub struct Explorer {
     last_reload: std::time::Instant,
     /// The thumbnail view (large pictures) instead of the list.
     grid: bool,
+    grid_scroll: ScrollHandle,
+    /// The grid's width in px, measured as it paints.
+    grid_width: std::rc::Rc<std::cell::Cell<f32>>,
     /// Thumbnails for the grid, filled in the background per folder.
     thumbs: Arc<Mutex<HashMap<PathBuf, Arc<RenderImage>>>>,
     /// The hover preview on screen, and a counter that drops stale ones.
@@ -828,6 +840,8 @@ impl Explorer {
             dirty: Default::default(),
             last_reload: std::time::Instant::now(),
             grid: false,
+            grid_scroll: ScrollHandle::new(),
+            grid_width: Default::default(),
             thumbs: Default::default(),
             preview: None,
             hover_gen: 0,
@@ -1253,7 +1267,35 @@ impl Explorer {
     /// Windows' icons for `paths`, a few at a time off the UI thread, each
     /// batch shown as it arrives. A newer folder has its own `icons`.
     /// The list or the thumbnail grid (for photos).
+    /// Tiles per row: a tile is 144 px wide with an 8 px gap, in 8 px of padding.
+    fn grid_columns(&self) -> usize {
+        ((self.grid_width.get() - 16. + 8.) / 152.).floor().max(1.) as usize
+    }
+
+    /// Arrow keys in the grid: the selection moves `by` tiles and stays in view.
+    fn grid_move(&mut self, by: isize, cx: &mut Context<Self>) {
+        let ix = self.table.update(cx, |t, cx| {
+            let l = t.delegate_mut();
+            let last = l.items.len().checked_sub(1)?;
+            let from = l.anchor.or_else(|| l.marked.first().copied());
+            let to = match from {
+                Some(f) => (f as isize + by).clamp(0, last as isize) as usize,
+                None => 0,
+            };
+            l.marked = [to].into();
+            l.anchor = Some(to);
+            cx.notify();
+            Some(to)
+        });
+        if let Some(ix) = ix {
+            // The canvas that measures the width is child 0; tiles follow it.
+            self.grid_scroll.scroll_to_item(ix + 1);
+        }
+        cx.notify();
+    }
+
     fn toggle_grid(&mut self, _: &ToggleGrid, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus.focus(window, cx);
         self.grid = !self.grid;
         if self.grid {
             let files: Vec<PathBuf> = self
@@ -1330,10 +1372,21 @@ impl Explorer {
         };
         let thumbs = self.thumbs.lock().unwrap();
         let icons = l.icons.lock().unwrap();
+        let width = self.grid_width.clone();
         let mut grid = div()
             .id("grid")
             .size_full()
             .overflow_y_scroll()
+            .track_scroll(&self.grid_scroll)
+            // Its width, for how many tiles an arrow key up or down skips.
+            .child(
+                canvas(
+                    move |bounds, _, _| width.set(f32::from(bounds.size.width)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
             .p_2()
             .flex()
             .flex_row()
@@ -1391,18 +1444,26 @@ impl Explorer {
                         if e.click_count() >= 2 {
                             return this.open_row(ix, window, cx);
                         }
-                        let ctrl = e.modifiers().control;
+                        let m = e.modifiers();
+                        this.focus.focus(window, cx); // arrow keys move in the grid
+                                                      // The grid's selection is `marked` alone: the hidden
+                                                      // table's own row would replace it a moment later.
                         this.table.update(cx, |t, cx| {
+                            t.clear_selection(cx);
                             let l = t.delegate_mut();
-                            if ctrl {
+                            if m.shift {
+                                let from = l.anchor.unwrap_or(ix);
+                                l.marked = (from.min(ix)..=from.max(ix)).collect();
+                            } else if m.control {
                                 if !l.marked.remove(&ix) {
                                     l.marked.insert(ix);
                                 }
+                                l.anchor = Some(ix);
                             } else {
                                 l.marked = [ix].into();
+                                l.anchor = Some(ix);
                             }
-                            l.anchor = Some(ix);
-                            t.set_selected_row(ix, cx);
+                            cx.notify();
                         });
                     }))
                     .on_mouse_down(
@@ -2499,7 +2560,7 @@ impl Render for Explorer {
         div()
             .v_flex()
             .size_full()
-            .key_context(CONTEXT)
+            .key_context(if self.grid { "Explorer Grid" } else { CONTEXT })
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::go_forward))
@@ -2521,6 +2582,16 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::properties))
             .on_action(cx.listener(Self::toggle_grid))
             .on_action(cx.listener(Self::search))
+            .on_action(cx.listener(|this, _: &GridLeft, _, cx| this.grid_move(-1, cx)))
+            .on_action(cx.listener(|this, _: &GridRight, _, cx| this.grid_move(1, cx)))
+            .on_action(cx.listener(|this, _: &GridUp, _, cx| {
+                let cols = this.grid_columns() as isize;
+                this.grid_move(-cols, cx)
+            }))
+            .on_action(cx.listener(|this, _: &GridDown, _, cx| {
+                let cols = this.grid_columns() as isize;
+                this.grid_move(cols, cx)
+            }))
             .on_action(cx.listener(|_, _: &ToggleHidden, _, cx| {
                 crate::prefs::set(cx, |s| s.show_hidden = !s.show_hidden)
             }))
