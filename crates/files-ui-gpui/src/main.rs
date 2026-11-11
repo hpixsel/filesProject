@@ -4,6 +4,7 @@
 
 mod explorer;
 mod theme;
+mod workspace;
 
 use gpui_kit::component::*;
 use gpui_kit::*;
@@ -22,6 +23,7 @@ fn main() {
         .run(move |cx| {
             gpui_kit::init(cx);
             explorer::bind_keys(cx);
+            workspace::bind_keys(cx);
             Theme::change(ThemeMode::Dark, None, cx);
             files_win::shell::set_menu_dark(true);
             theme::apply(theme::ACCENTS[0].1, cx);
@@ -31,7 +33,7 @@ fn main() {
                 ..Default::default()
             };
             gpui_kit::open_window(options, cx, |window, cx| {
-                cx.new(|cx| explorer::Explorer::new(start, window, cx))
+                cx.new(|cx| workspace::Workspace::new(start, window, cx))
             })
             .expect("open window");
         });

@@ -48,6 +48,11 @@ pub fn apply(hue: f32, cx: &mut App) {
     t.drag_border = primary;
 
     t.title_bar = c(0., 0., 0.);
+    t.tab_bar = c(0., 0., 0.);
+    t.tab = c(0., 0., 0.);
+    t.tab_active = c(0.7, 0.6, l(0.16, 0.12));
+    t.tab_foreground = t.muted_foreground;
+    t.tab_active_foreground = t.foreground;
     t.title_bar_border = c(0., 0., 0.);
     t.table = c(0., 0., 0.);
     t.table_head = c(0.14, 0.5, 0.06);
