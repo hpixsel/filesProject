@@ -456,6 +456,21 @@ pub fn empty_recycle_bin(window: isize) -> bool {
     unsafe { SHEmptyRecycleBinW(hwnd(window), PCWSTR::null(), 0) }.is_ok()
 }
 
+/// Windows' Properties window for a file or folder (it stays open on its
+/// own). Call it outside GPUI's event dispatch.
+pub fn properties(window: isize, path: &Path) {
+    use windows::Win32::UI::Shell::{SHObjectProperties, SHOP_FILEPATH};
+    // SAFETY: a valid owner window and a NUL-terminated path.
+    let _ = unsafe {
+        SHObjectProperties(
+            hwnd(window),
+            SHOP_FILEPATH,
+            &HSTRING::from(path.as_os_str()),
+            PCWSTR::null(),
+        )
+    };
+}
+
 #[cfg(test)]
 mod menu_tests {
     use super::*;

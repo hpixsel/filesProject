@@ -43,6 +43,43 @@ pub fn list_dir(dir: &Path) -> io::Result<Vec<Item>> {
     Ok(items)
 }
 
+/// What a listing is ordered by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortBy {
+    #[default]
+    Name,
+    Size,
+    Modified,
+}
+
+/// Orders `items` folders first (like Explorer), then by `by`; ties and
+/// equal values fall back to the name. `size_of` gives folder sizes, which
+/// a scan fills in later.
+pub fn sort_items(
+    items: &mut [Item],
+    by: SortBy,
+    descending: bool,
+    size_of: impl Fn(&Item) -> Option<u64>,
+) {
+    items.sort_by_cached_key(|i| {
+        let key = match by {
+            SortBy::Name => 0,
+            SortBy::Size => size_of(i).unwrap_or(0),
+            SortBy::Modified => i
+                .modified
+                .and_then(|m| m.duration_since(SystemTime::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_secs()),
+        };
+        (!i.is_dir, key, i.name.to_lowercase())
+    });
+    if descending {
+        // Reverse within folders and within files, keeping folders first.
+        let split = items.iter().position(|i| !i.is_dir).unwrap_or(items.len());
+        items[..split].reverse();
+        items[split..].reverse();
+    }
+}
+
 /// Back / forward / up navigation, like a browser.
 #[derive(Debug, Clone)]
 pub struct History {
@@ -165,6 +202,31 @@ mod tests {
         assert!(h.up(), "a drive root goes up to This PC");
         assert_eq!(h.current(), Path::new(places::THIS_PC));
         assert!(!h.up(), "This PC is the top");
+    }
+
+    #[test]
+    fn sorting_keeps_folders_first() {
+        let item = |name: &str, is_dir: bool, size: u64| Item {
+            name: name.into(),
+            path: PathBuf::from(name),
+            is_dir,
+            size: Some(size),
+            modified: None,
+            origin: None,
+        };
+        let mut v = vec![
+            item("b.txt", false, 1),
+            item("Z", true, 9),
+            item("a.txt", false, 5),
+            item("y", true, 2),
+        ];
+        let names = |v: &[Item]| v.iter().map(|i| i.name.clone()).collect::<Vec<_>>();
+        sort_items(&mut v, SortBy::Name, false, |i| i.size);
+        assert_eq!(names(&v), ["y", "Z", "a.txt", "b.txt"]);
+        sort_items(&mut v, SortBy::Size, true, |i| i.size);
+        assert_eq!(names(&v), ["Z", "y", "a.txt", "b.txt"]);
+        sort_items(&mut v, SortBy::Name, true, |i| i.size);
+        assert_eq!(names(&v), ["Z", "y", "b.txt", "a.txt"]);
     }
 
     #[test]

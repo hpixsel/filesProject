@@ -1,7 +1,7 @@
 //! The explorer pane: toolbar, address bar, file table, status bar.
 
 use files_app::places::{self, Place};
-use files_app::{format_size, list_dir, History, Item};
+use files_app::{format_size, list_dir, History, Item, SortBy};
 use files_core::machine::{self, Event};
 use files_core::Progress;
 use files_jobs::sizes::{scan_sizes, SizeScan};
@@ -40,7 +40,11 @@ actions!(
         CopyPath,
         SelectAll,
         OpenTerminal,
-        Rename
+        Rename,
+        FocusAddress,
+        NewFolder,
+        ClearSelection,
+        Properties
     ]
 );
 
@@ -140,6 +144,14 @@ pub fn bind_keys(cx: &mut App) {
         // Ctrl+` does not arrive on a Polish keyboard layout.
         KeyBinding::new("ctrl-alt-t", OpenTerminal, Some(CONTEXT)),
         KeyBinding::new("f2", Rename, Some(CONTEXT)),
+        // Explorer's keys: Backspace goes back, Ctrl+L/Alt+D/F4 to the address.
+        KeyBinding::new("backspace", GoBack, Some(CONTEXT)),
+        KeyBinding::new("ctrl-l", FocusAddress, Some(CONTEXT)),
+        KeyBinding::new("alt-d", FocusAddress, Some(CONTEXT)),
+        KeyBinding::new("f4", FocusAddress, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-n", NewFolder, Some(CONTEXT)),
+        KeyBinding::new("escape", ClearSelection, Some(CONTEXT)),
+        KeyBinding::new("alt-enter", Properties, Some(CONTEXT)),
     ]);
 }
 
@@ -301,9 +313,19 @@ pub struct Listing {
     renaming: Option<(PathBuf, Entity<InputState>)>,
     /// Set when a right-click hit a row, so the folder's menu stays shut.
     row_menu: Arc<AtomicBool>,
+    /// The column order chosen in the header (kept across folders).
+    sort: (SortBy, bool),
 }
 
 impl Listing {
+    fn apply_sort(&mut self) {
+        let sizes = self.sizes.lock().unwrap();
+        let (by, descending) = self.sort;
+        files_app::sort_items(&mut self.items, by, descending, |i| {
+            i.size.or_else(|| sizes.get(&i.path).copied())
+        });
+    }
+
     fn marked_paths(&self) -> Vec<PathBuf> {
         self.marked
             .iter()
@@ -325,16 +347,48 @@ impl TableDelegate for Listing {
         self.items.len()
     }
     fn column(&self, col_ix: usize, _: &App) -> Column {
+        // The header shows the order in use (sorting is ours, see perform_sort).
+        let sort = |by: SortBy| match self.sort {
+            (b, false) if b == by => ColumnSort::Ascending,
+            (b, true) if b == by => ColumnSort::Descending,
+            _ => ColumnSort::Default,
+        };
         match col_ix {
-            0 => Column::new("name", tr!("Name", "Nazwa")).width(px(440.)),
-            1 => Column::new("size", tr!("Size", "Rozmiar")).width(px(110.)),
+            0 => Column::new("name", tr!("Name", "Nazwa"))
+                .width(px(440.))
+                .sort(sort(SortBy::Name)),
+            1 => Column::new("size", tr!("Size", "Rozmiar"))
+                .width(px(110.))
+                .sort(sort(SortBy::Size)),
             2 if self.place == Place::RecycleBin => {
                 Column::new("modified", tr!("Deleted", "Usunięto")).width(px(160.))
             }
-            2 => Column::new("modified", tr!("Modified", "Zmodyfikowano")).width(px(160.)),
+            2 => Column::new("modified", tr!("Modified", "Zmodyfikowano"))
+                .width(px(160.))
+                .sort(sort(SortBy::Modified)),
             _ => Column::new("origin", tr!("Original location", "Oryginalna lokalizacja"))
                 .width(px(320.)),
         }
+    }
+    /// A header click: that column ascending, descending, then back to the
+    /// name. Folders stay first.
+    fn perform_sort(
+        &mut self,
+        col_ix: usize,
+        sort: ColumnSort,
+        _: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) {
+        let by = [SortBy::Name, SortBy::Size, SortBy::Modified][col_ix.min(2)];
+        self.sort = match sort {
+            ColumnSort::Ascending => (by, false),
+            ColumnSort::Descending => (by, true),
+            ColumnSort::Default => (SortBy::Name, false),
+        };
+        self.apply_sort();
+        self.marked.clear();
+        self.anchor = None;
+        cx.notify();
     }
     fn render_tr(
         &mut self,
@@ -537,6 +591,10 @@ pub struct Explorer {
     polish: bool,
     /// This PC's drive tiles.
     drives: Vec<Drive>,
+    /// A folder just made with Ctrl+Shift+N, renamed once the list shows it.
+    pending_rename: Option<PathBuf>,
+    /// Letters typed to jump to a name, and when the last one came.
+    typed: (String, std::time::Instant),
     focus: FocusHandle,
 }
 
@@ -553,6 +611,7 @@ impl Explorer {
             explorer: cx.weak_entity(),
             renaming: None,
             row_menu: Default::default(),
+            sort: Default::default(),
         };
         // Ctrl/Shift+click is ours (Listing::marked), not the table's single row.
         let table =
@@ -623,6 +682,8 @@ impl Explorer {
             thread_notice: Default::default(),
             polish: i18n::polish(),
             drives: Vec::new(),
+            pending_rename: None,
+            typed: (String::new(), std::time::Instant::now()),
             focus: cx.focus_handle(),
         };
         this.load(window, cx);
@@ -664,7 +725,7 @@ impl Explorer {
         let task = cx.background_spawn(async move { list(&dir) });
         cx.spawn_in(window, async move |this, cx| {
             let listed = task.await;
-            let _ = this.update(cx, |this, cx| {
+            let _ = this.update_in(cx, |this, window, cx| {
                 match listed {
                     Ok(items) => {
                         this.status = tr!("{} items", "Elementów: {}", items.len()).into();
@@ -684,8 +745,20 @@ impl Explorer {
                             t.delegate_mut().marked.clear();
                             t.delegate_mut().renaming = None;
                             t.delegate_mut().anchor = None;
+                            t.delegate_mut().apply_sort();
                             t.refresh(cx);
                         });
+                        // Ctrl+Shift+N: the new folder's name is edited right away.
+                        if let Some(new) = this.pending_rename.take() {
+                            let items = &this.table.read(cx).delegate().items;
+                            if let Some(ix) = items.iter().position(|i| i.path == new) {
+                                this.table.update(cx, |t, cx| {
+                                    t.set_selected_row(ix, cx);
+                                    t.scroll_to_row(ix, cx);
+                                });
+                                this.rename(&Rename, window, cx);
+                            }
+                        }
                     }
                     Err(e) => {
                         this.status =
@@ -851,6 +924,113 @@ impl Explorer {
         outside_dispatch(cx, move || {
             if let Ok(Picked::Ran) = files_win::shell::folder_menu(h, &dir) {
                 changed.store(true, Ordering::SeqCst);
+            }
+        });
+    }
+
+    fn focus_address(&mut self, _: &FocusAddress, window: &mut Window, cx: &mut Context<Self>) {
+        self.address.update(cx, |a, cx| {
+            a.focus(window, cx);
+            a.select_all(window, cx);
+        });
+    }
+
+    /// Ctrl+Shift+N: "New folder" (numbered if taken), then its name is
+    /// edited in place.
+    fn new_folder(&mut self, _: &NewFolder, window: &mut Window, cx: &mut Context<Self>) {
+        let dir = self.history.current().to_path_buf();
+        if Place::of(&dir) != Place::Folder {
+            return;
+        }
+        let base = dir.join(tr!("New folder", "Nowy folder"));
+        let task = cx.background_spawn(async move {
+            let free = (1..1000)
+                .map(|n| {
+                    if n == 1 {
+                        base.clone()
+                    } else {
+                        files_core::numbered(&base, n)
+                    }
+                })
+                .find(|p| !p.exists())
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::AlreadyExists))?;
+            std::fs::create_dir(&free).map(|()| free)
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let made = task.await;
+            let _ = this.update_in(cx, |this, window, cx| match made {
+                Ok(path) => {
+                    this.pending_rename = Some(path);
+                    this.load(window, cx);
+                }
+                Err(e) => {
+                    this.notice = tr!(
+                        "Cannot create a folder: {e}",
+                        "Nie można utworzyć folderu: {e}"
+                    )
+                    .into();
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Esc: no selection (or, while renaming, the old name stays).
+    fn clear_selection(&mut self, _: &ClearSelection, window: &mut Window, cx: &mut Context<Self>) {
+        if self.table.read(cx).delegate().renaming.is_some() {
+            return self.cancel_rename(window, cx);
+        }
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().marked.clear();
+            t.delegate_mut().anchor = None;
+            t.clear_selection(cx);
+        });
+    }
+
+    /// Alt+Enter: Windows' Properties for the selection, or the folder.
+    fn properties(&mut self, _: &Properties, window: &mut Window, cx: &mut Context<Self>) {
+        let mut paths = self.selected(cx);
+        if paths.is_empty() && Place::of(self.history.current()) == Place::Folder {
+            paths.push(self.history.current().to_path_buf());
+        }
+        let (Some(path), Some(h)) = (paths.into_iter().next(), hwnd(window)) else {
+            return;
+        };
+        outside_dispatch(cx, move || files_win::shell::properties(h, &path));
+    }
+
+    /// Typing letters in the list jumps to the first name starting with
+    /// them, like Explorer; a pause of a second starts over.
+    fn type_to_select(&mut self, e: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let m = e.keystroke.modifiers;
+        let Some(ch) = e.keystroke.key_char.clone() else {
+            return;
+        };
+        let typing_elsewhere = self
+            .address
+            .read(cx)
+            .focus_handle(cx)
+            .contains_focused(window, cx)
+            || self.table.read(cx).delegate().renaming.is_some();
+        if m.control || m.alt || m.platform || typing_elsewhere || ch.trim().is_empty() {
+            return;
+        }
+        let (typed, at) = &mut self.typed;
+        if at.elapsed() > Duration::from_secs(1) {
+            typed.clear();
+        }
+        typed.push_str(&ch.to_lowercase());
+        *at = std::time::Instant::now();
+        let prefix = typed.clone();
+        self.table.update(cx, |t, cx| {
+            let items = &t.delegate().items;
+            if let Some(ix) = items
+                .iter()
+                .position(|i| i.name.to_lowercase().starts_with(&prefix))
+            {
+                t.set_selected_row(ix, cx);
+                t.scroll_to_row(ix, cx);
             }
         });
     }
@@ -1474,6 +1654,11 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::copy_path))
             .on_action(cx.listener(Self::open_terminal))
             .on_action(cx.listener(Self::rename))
+            .on_action(cx.listener(Self::focus_address))
+            .on_action(cx.listener(Self::new_folder))
+            .on_action(cx.listener(Self::clear_selection))
+            .on_action(cx.listener(Self::properties))
+            .on_key_down(cx.listener(Self::type_to_select))
             // The mouse's side buttons.
             .on_mouse_down(
                 MouseButton::Navigate(NavigationDirection::Back),
