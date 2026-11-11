@@ -4,8 +4,13 @@ use gpui_kit::component::button::*;
 use gpui_kit::component::table::*;
 use gpui_kit::component::*;
 use gpui_kit::*;
+use std::time::Duration;
+
+mod win;
 
 const ROWS: usize = 100_000;
+/// The shell menu always targets a real file so its entries are meaningful.
+const MENU_FILE: &str = r"C:\Windows\notepad.exe";
 /// (name, hue in degrees)
 const ACCENTS: [(&str, f32); 5] = [
     ("Blue", 217.),
@@ -72,9 +77,38 @@ fn apply_palette(hue: f32, opaque: bool, cx: &mut App) {
     theme.font_family = "Segoe UI Variable Text".into();
 }
 
-struct Files;
+struct Files {
+    log: win::Log,
+}
 
 impl TableDelegate for Files {
+    fn render_tr(
+        &mut self,
+        row_ix: usize,
+        _: &mut Window,
+        _: &mut Context<TableState<Self>>,
+    ) -> Stateful<Div> {
+        let log = self.log.clone();
+        div()
+            .id(("row", row_ix))
+            .on_mouse_down(MouseButton::Right, move |_, window, cx| {
+                let Some(hwnd) = win::hwnd_of(window) else { return };
+                let log = log.clone();
+                // TrackPopupMenuEx runs a modal message loop. Running it inside
+                // GPUI's event dispatch re-enters GPUI while its state is
+                // borrowed and panics, so open the menu from a task instead,
+                // outside any App borrow.
+                cx.spawn(async move |_: &mut AsyncApp| {
+                    let line = match win::show_shell_menu(hwnd, MENU_FILE) {
+                        Ok(Some(id)) => format!("Shell menu: ran command {id} on {MENU_FILE}"),
+                        Ok(None) => "Shell menu: closed without a choice".to_string(),
+                        Err(e) => format!("Shell menu error: {e}"),
+                    };
+                    log.lock().unwrap().push(line);
+                })
+                .detach();
+            })
+    }
     fn columns_count(&self, _: &App) -> usize {
         3
     }
@@ -117,6 +151,7 @@ struct Spike {
     table: Entity<TableState<Files>>,
     accent: usize,
     backdrop: usize,
+    log: win::Log,
 }
 
 impl Spike {
@@ -149,6 +184,7 @@ impl Render for Spike {
                             .on_click(move |_, window, cx| {
                                 let mode = if dark { ThemeMode::Light } else { ThemeMode::Dark };
                                 Theme::change(mode, Some(window), cx);
+                                win::set_menu_dark(!dark);
                                 apply_palette(hue, opaque, cx); // change() resets the colours
                             }),
                     )
@@ -180,6 +216,14 @@ impl Render for Spike {
                     ),
             )
             .child(
+                div().px_3().pb_2().text_sm().text_color(cx.theme().muted_foreground).child(
+                    self.log.lock().unwrap().last().cloned().unwrap_or_else(|| {
+                        "Drag files here from Explorer (also from a .zip); right-click a row for the Windows menu."
+                            .to_string()
+                    }),
+                ),
+            )
+            .child(
                 div()
                     .flex_1()
                     .mx_3()
@@ -197,15 +241,32 @@ fn main() {
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
         Theme::change(ThemeMode::Dark, None, cx);
+        win::set_menu_dark(true);
         apply_palette(ACCENTS[0].1, false, cx);
         let options = WindowOptions {
             titlebar: Some(TitleBar::title_bar_options()),
-            window_background: WindowBackgroundAppearance::MicaBackdrop,
+            window_background: WindowBackgroundAppearance::Blurred,
             ..Default::default()
         };
         gpui_kit::open_window(options, cx, |window, cx| {
-            let table = cx.new(|cx| TableState::new(Files, window, cx));
-            cx.new(|_| Spike { table, accent: 0, backdrop: 0 })
+            let log = win::Log::default();
+            if let Some(hwnd) = win::hwnd_of(window) {
+                if let Err(e) = win::register_drop(hwnd, log.clone()) {
+                    log.lock().unwrap().push(format!("RegisterDragDrop failed: {e}"));
+                }
+            }
+            let table = cx.new(|cx| TableState::new(Files { log: log.clone() }, window, cx));
+            cx.new(|cx| {
+                // COM callbacks cannot reach GPUI, so repaint a few times a second.
+                cx.spawn(async move |this: WeakEntity<Spike>, cx: &mut AsyncApp| loop {
+                    cx.background_executor().timer(Duration::from_millis(250)).await;
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                })
+                .detach();
+                Spike { table, accent: 0, backdrop: 2, log }
+            })
         })
         .expect("open window");
     });
