@@ -139,7 +139,7 @@ session reads.
         `session.txt`, reopened at start; `restore_tabs=false` in
         `settings.txt` turns it off.
     *   **Crash log:** panics go to
-        `%LOCALAPPDATA%\FilesProject\logsiles.log` with a backtrace.
+        `%LOCALAPPDATA%\FilesProject\logs\files.log` with a backtrace.
     *   **Fixed:** a crash when a tab's close button closed the last tab (the
         click also reached the tab).
     *   `--replace-explorer` now also takes This PC and the Recycle Bin;
