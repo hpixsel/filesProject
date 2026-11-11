@@ -1,6 +1,5 @@
 //! The explorer pane: toolbar, address bar, file table, status bar.
 
-use crate::theme;
 use files_app::{format_size, list_dir, History, Item};
 use files_core::machine::{self, Event};
 use files_core::Progress;
@@ -32,6 +31,7 @@ actions!(
         DeleteSel,
         DeleteForever,
         OpenSel,
+        CopyPath,
         SelectAll
     ]
 );
@@ -51,10 +51,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-delete", DeleteForever, Some(CONTEXT)),
         KeyBinding::new("enter", OpenSel, Some(CONTEXT)),
         KeyBinding::new("ctrl-a", SelectAll, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-c", CopyPath, Some(CONTEXT)),
     ]);
 }
 
-fn hwnd(window: &Window) -> Option<isize> {
+pub fn hwnd(window: &Window) -> Option<isize> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     match HasWindowHandle::window_handle(window).ok()?.as_raw() {
         RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
@@ -229,9 +230,6 @@ pub struct Explorer {
     changed: Arc<AtomicBool>,
     /// Outcome of a file operation finished on another thread.
     thread_notice: Arc<Mutex<Option<String>>>,
-    /// Folder that drops land in; the drop target reads it at drop time.
-    drop_dir: Arc<Mutex<PathBuf>>,
-    accent: usize,
     focus: FocusHandle,
 }
 
@@ -307,24 +305,14 @@ impl Explorer {
             conflict: None,
             changed,
             thread_notice: Default::default(),
-            drop_dir: Default::default(),
-            accent: 0,
             focus: cx.focus_handle(),
         };
-        if let Some(h) = hwnd(window) {
-            let on_drop = this.report_done("Drop");
-            if let Err(e) = files_win::drop::register(h, this.drop_dir.clone(), on_drop) {
-                this.notice = format!("Drag and drop is off: {e}").into();
-            }
-        }
         this.load(window, cx);
-        this.focus.focus(window, cx);
         this
     }
 
     fn load(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dir = self.history.current().to_path_buf();
-        *self.drop_dir.lock().unwrap() = dir.clone();
         let shown = dir.display().to_string();
         self.address
             .update(cx, |a, cx| a.set_value(shown, window, cx));
@@ -480,7 +468,10 @@ impl Explorer {
 
     /// Callback for a file operation running on its own thread: records the
     /// outcome and asks the next poll to reload the folder.
-    fn report_done(&self, what: &'static str) -> impl Fn(files_win::Result<()>) + Send + 'static {
+    pub fn report_done(
+        &self,
+        what: &'static str,
+    ) -> impl Fn(files_win::Result<()>) + Send + 'static {
         let (changed, notice) = (self.changed.clone(), self.thread_notice.clone());
         move |r| {
             // A cancelled Windows dialog returns an error too; say so plainly.
@@ -556,9 +547,46 @@ impl Explorer {
         cx.notify();
     }
 
-    fn cycle_accent(&mut self, cx: &mut Context<Self>) {
-        self.accent = (self.accent + 1) % theme::ACCENTS.len();
-        theme::apply(theme::ACCENTS[self.accent].1, cx);
+    pub fn current_dir(&self) -> &Path {
+        self.history.current()
+    }
+
+    /// Tab title: the folder name, or the drive for a root.
+    pub fn title(&self) -> String {
+        let dir = self.history.current();
+        dir.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| dir.display().to_string())
+    }
+
+    pub fn go_to(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        self.history.go(dir);
+        self.load(window, cx);
+    }
+
+    pub fn focus_handle(&self) -> FocusHandle {
+        self.focus.clone()
+    }
+
+    /// Where a drop's outcome goes: it reloads this tab and shows the result.
+    pub fn drop_sink(&self) -> impl Fn(files_win::Result<()>) + 'static {
+        self.report_done("Drop")
+    }
+
+    /// Ctrl+Shift+C: the selected paths (or the folder) as plain text, one
+    /// per line, without the quotes Windows' "Copy as path" adds.
+    fn copy_path(&mut self, _: &CopyPath, _: &mut Window, cx: &mut Context<Self>) {
+        let mut paths = self.selected(cx);
+        if paths.is_empty() {
+            paths.push(self.history.current().to_path_buf());
+        }
+        let text: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+        cx.write_to_clipboard(ClipboardItem::new_string(text.join("\r\n")));
+        self.notice = match &paths[..] {
+            [one] => format!("Copied path {}", one.display()).into(),
+            many => format!("Copied {} paths", many.len()).into(),
+        };
+        cx.notify();
     }
 }
 
@@ -610,8 +638,6 @@ fn start_paste(dir: &Path, flag: Option<&str>) -> std::io::Result<Arc<Mutex<Past
 
 impl Render for Explorer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let dark = cx.theme().mode.is_dark();
-        let hue = theme::ACCENTS[self.accent].1;
         let muted = cx.theme().muted_foreground;
         let progress = self
             .paste
@@ -661,32 +687,6 @@ impl Render for Explorer {
                     .label("Paste from RDP")
                     .tooltip("Ctrl+V")
                     .on_click(cx.listener(|this, _, w, cx| this.paste_here(&PasteHere, w, cx))),
-            )
-            .child(
-                Button::new("mode")
-                    .ghost()
-                    .icon(if dark { IconName::Sun } else { IconName::Moon })
-                    .tooltip("Light / dark")
-                    .on_click(move |_, window, cx| {
-                        let mode = if dark {
-                            ThemeMode::Light
-                        } else {
-                            ThemeMode::Dark
-                        };
-                        Theme::change(mode, Some(window), cx);
-                        files_win::shell::set_menu_dark(!dark);
-                        theme::apply(hue, cx); // change() resets the colours
-                    }),
-            )
-            .child(
-                Button::new("accent")
-                    .ghost()
-                    .icon(IconName::Palette)
-                    .tooltip("Accent colour")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.cycle_accent(cx);
-                        window.refresh();
-                    })),
             );
 
         let mut status = div()
@@ -780,8 +780,8 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::delete_forever))
             .on_action(cx.listener(Self::open_sel))
             .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::copy_path))
             .text_color(cx.theme().foreground)
-            .child(TitleBar::new().child(div().pl_2().child("FilesProject")))
             .child(toolbar)
             .child(
                 div()

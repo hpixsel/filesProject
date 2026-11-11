@@ -213,3 +213,14 @@ pub fn local_time(t: SystemTime) -> String {
         local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute
     )
 }
+
+/// Drive roots (`C:\`, `D:\`…). Uses the drive bitmask, so offline network
+/// drives cannot make it hang.
+pub fn drives() -> Vec<PathBuf> {
+    // SAFETY: no arguments, returns a bitmask.
+    let mask = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
+    (0..26u8)
+        .filter(|i| mask & (1 << i) != 0)
+        .map(|i| PathBuf::from(format!("{}:\\", (b'A' + i) as char)))
+        .collect()
+}
