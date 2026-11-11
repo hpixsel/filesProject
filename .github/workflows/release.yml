@@ -20,8 +20,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned toolchain
         run: rustup show
-      # Reuses what CI built on main; a cold release build of GPUI is slow.
-      - uses: Swatinem/rust-cache@v2
       - name: Tag matches the app version
         shell: pwsh
         run: |
