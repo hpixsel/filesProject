@@ -138,6 +138,8 @@ pub struct Explorer {
     table: Entity<TableState<Listing>>,
     address: Entity<InputState>,
     status: SharedString,
+    /// Result of the last paste; survives folder reloads.
+    notice: SharedString,
     paste: Option<Arc<Mutex<Paste>>>,
     /// Set when a paste stopped because files already exist; asks what to do.
     conflict: Option<SharedString>,
@@ -199,6 +201,7 @@ impl Explorer {
             table,
             address,
             status: SharedString::default(),
+            notice: SharedString::default(),
             paste: None,
             conflict: None,
             changed,
@@ -279,16 +282,16 @@ impl Explorer {
     fn start(&mut self, flag: Option<&'static str>, cx: &mut Context<Self>) {
         self.conflict = None;
         if self.paste.is_some() {
-            self.status = "A paste is already running.".into();
+            self.notice = "A paste is already running.".into();
             cx.notify();
             return;
         }
         match start_paste(self.history.current(), flag) {
             Ok(state) => {
                 self.paste = Some(state);
-                self.status = "Pasting…".into();
+                self.notice = "Pasting…".into();
             }
-            Err(e) => self.status = format!("Cannot start rdppaste: {e}").into(),
+            Err(e) => self.notice = format!("Cannot start rdppaste: {e}").into(),
         }
         cx.notify();
     }
@@ -309,16 +312,23 @@ impl Explorer {
         let done = paste.lock().unwrap().result.clone();
         if let Some((code, message)) = done {
             self.paste = None;
-            self.status = match code {
+            // Kept in `notice`, which the folder reload below does not touch.
+            self.notice = match code {
                 0 => message.into(),
+                // e.g. NanaZip/7-Zip or a plain Explorer copy put real paths
+                // (CF_HDROP) on the clipboard, not virtual files.
+                4 if message.contains("CF_HDROP") => "These are regular files, not files from an RDP session or a zip. Pasting regular files comes with local copy (M2).".into(),
+                4 => "The clipboard holds no files. Copy files (Ctrl+C) in Explorer or in the RDP session first.".into(),
                 // rdppaste exit code 5: files already exist, nothing written.
                 5 => {
-                    self.conflict = Some(message.clone().into());
+                    self.conflict = Some(message.into());
                     SharedString::default()
                 }
-                _ => format!("Paste ended ({code}): {message}").into(),
+                _ => format!("Paste failed: {message}").into(),
             };
-            self.load(window, cx);
+            if code == 0 {
+                self.load(window, cx);
+            }
         }
         cx.notify();
     }
@@ -459,7 +469,12 @@ impl Render for Explorer {
             .pb_2()
             .text_sm()
             .text_color(muted)
-            .child(self.status.clone());
+            .child(self.status.clone())
+            .child(
+                div()
+                    .text_color(cx.theme().foreground)
+                    .child(self.notice.clone()),
+            );
         if let Some(p) = progress {
             let pct = p
                 .bytes_total
@@ -516,7 +531,7 @@ impl Render for Explorer {
                         .label("Cancel")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.conflict = None;
-                            this.status = "Paste cancelled; nothing was written.".into();
+                            this.notice = "Paste cancelled; nothing was written.".into();
                             cx.notify();
                         })),
                 );

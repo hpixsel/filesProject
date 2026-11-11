@@ -23,7 +23,7 @@ Copy files with Ctrl+C in Windows Explorer inside an RDP session, then run
 locally:
 
 ```sh
-rdppaste <target-dir> [--overwrite]
+rdppaste <target-dir> [--overwrite | --skip | --rename]
 rdppaste --formats      # list the formats currently on the clipboard
 rdppaste --help
 ```
@@ -35,6 +35,7 @@ rdppaste --help
 | 2 | cancelled (Ctrl+C) |
 | 3 | stalled (no progress for 60 s) |
 | 4 | no virtual files on the clipboard |
+| 5 | files already exist; nothing written (run again with --overwrite, --skip or --rename) |
 | 64 | usage error |
 
 The log is written to `%LOCALAPPDATA%\FilesProject\logs\rdppaste.log`. It

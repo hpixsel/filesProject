@@ -18,7 +18,7 @@ Each milestone gets its own design document in `docs/designs/`.
 - [x] GPUI spike, to confirm RAM, OLE drop and the context menu on Windows
 - [x] `files-app` (view state) and `files-ui-gpui` (rendering)
 - [x] single-pane list; Ctrl+V pastes through a child `rdppaste` process (Q8)
-- [ ] interactive conflict handling (Q5)
+- [x] interactive conflict handling (Q5): replace, skip existing, keep both
 
 ## M2: local operations
 
