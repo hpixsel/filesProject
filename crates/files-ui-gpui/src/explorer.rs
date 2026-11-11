@@ -35,7 +35,8 @@ actions!(
         DeleteForever,
         OpenSel,
         CopyPath,
-        SelectAll
+        SelectAll,
+        OpenTerminal
     ]
 );
 
@@ -56,6 +57,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-a", SelectAll, Some(CONTEXT)),
         // Ctrl+Shift+C is often taken globally (e.g. by ShareX), so Ctrl+Alt+C.
         KeyBinding::new("ctrl-alt-c", CopyPath, Some(CONTEXT)),
+        // Ctrl+` does not arrive on a Polish keyboard layout.
+        KeyBinding::new("ctrl-alt-t", OpenTerminal, Some(CONTEXT)),
     ]);
 }
 
@@ -565,6 +568,38 @@ impl Explorer {
         cx.notify();
     }
 
+    /// Windows Terminal in this folder (its default profile), else
+    /// PowerShell 7, else Windows PowerShell.
+    fn open_terminal(&mut self, _: &OpenTerminal, _: &mut Window, cx: &mut Context<Self>) {
+        const CREATE_NEW_CONSOLE: u32 = 0x10;
+        let dir = self.history.current();
+        // wt.exe is a Store app alias, which a search by name does not find.
+        let wt = std::env::var_os("LOCALAPPDATA")
+            .map(|d| PathBuf::from(d).join(r"Microsoft\WindowsApps\wt.exe"))
+            .unwrap_or_else(|| "wt".into());
+        let console = |exe: &str| {
+            Command::new(exe)
+                .current_dir(dir)
+                .creation_flags(CREATE_NEW_CONSOLE)
+                .spawn()
+        };
+        // `-d .` plus current_dir: wt misreads a quoted path ending in `\`, like `C:\`.
+        let started = Command::new(wt)
+            .args(["-d", "."])
+            .current_dir(dir)
+            .spawn()
+            .or_else(|_| console("pwsh"))
+            .or_else(|_| console("powershell"));
+        if let Err(e) = started {
+            self.notice = tr!(
+                "Cannot open a terminal: {e}",
+                "Nie można otworzyć terminala: {e}"
+            )
+            .into();
+            cx.notify();
+        }
+    }
+
     pub fn current_dir(&self) -> &Path {
         self.history.current()
     }
@@ -719,6 +754,19 @@ impl Render for Explorer {
                     .on_click(cx.listener(|this, _, w, cx| this.copy_path(&CopyPath, w, cx))),
             )
             .child(
+                Button::new("terminal")
+                    .cursor_pointer()
+                    .ghost()
+                    .icon(IconName::SquareTerminal)
+                    .tooltip(tr!(
+                        "Open terminal here (Ctrl+Alt+T)",
+                        "Otwórz terminal tutaj (Ctrl+Alt+T)"
+                    ))
+                    .on_click(
+                        cx.listener(|this, _, w, cx| this.open_terminal(&OpenTerminal, w, cx)),
+                    ),
+            )
+            .child(
                 Button::new("paste")
                     .cursor_pointer()
                     .primary()
@@ -828,6 +876,7 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::open_sel))
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::copy_path))
+            .on_action(cx.listener(Self::open_terminal))
             .text_color(cx.theme().foreground)
             .child(toolbar)
             .child(

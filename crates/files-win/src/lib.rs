@@ -5,6 +5,7 @@ pub mod drop;
 #[cfg(feature = "fake")]
 pub mod fake;
 pub mod fileop;
+pub mod instance;
 pub mod io;
 pub mod process;
 pub mod shell;

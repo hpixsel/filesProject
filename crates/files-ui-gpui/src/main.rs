@@ -18,6 +18,23 @@ fn main() {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(r"C:\"));
+    // `files .` from a terminal: relative to where it was typed.
+    let start = std::path::absolute(&start).unwrap_or(start);
+
+    // Already running: the folder opens as a tab there.
+    if files_win::instance::send(&start) {
+        return;
+    }
+    // Folders from later `files <folder>` calls; checked on the pipe thread,
+    // since a network path can take seconds to answer.
+    let (folders, incoming) = std::sync::mpsc::channel();
+    if let Err(e) = files_win::instance::serve(move |dir| {
+        if dir.is_dir() {
+            let _ = folders.send(dir);
+        }
+    }) {
+        eprintln!("another window serves `files <folder>`: {e}");
+    }
 
     // Icons (toolbar, file list, window caption buttons) live in these assets.
     gpui_kit::application()
@@ -43,7 +60,7 @@ fn main() {
                 ..Default::default()
             };
             gpui_kit::open_window(options, cx, move |window, cx| {
-                cx.new(|cx| workspace::Workspace::new(start, settings, window, cx))
+                cx.new(|cx| workspace::Workspace::new(start, settings, incoming, window, cx))
             })
             .expect("open window");
         });
