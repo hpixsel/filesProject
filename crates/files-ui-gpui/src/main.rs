@@ -13,26 +13,39 @@ use gpui_kit::component::*;
 use gpui_kit::*;
 use std::path::PathBuf;
 
-/// `files --install`: copy to the install folder and put it on PATH.
-fn install() {
+/// Command-line actions: they print to the terminal and exit. False when
+/// `arg` is not one of them.
+fn command(arg: &std::ffi::OsStr) -> bool {
+    use files_app::{replace_explorer, update};
+    let done = match arg.to_str() {
+        Some("--install") => update::install().and_then(|dir| {
+            files_win::shell::add_to_user_path(&dir).map_err(|e| e.to_string())?;
+            Ok(format!(
+                "Installed to {}. Open a new terminal and run `files`.",
+                dir.display()
+            ))
+        }),
+        Some("--replace-explorer") => replace_explorer::replace().map(|()| {
+            "Folders, drives and Win+E now open FilesProject. \
+             Undo: files --restore-explorer"
+                .into()
+        }),
+        Some("--restore-explorer") => replace_explorer::restore()
+            .map(|()| "Windows Explorer opens folders, drives and Win+E again.".into()),
+        _ => return false,
+    };
     files_win::shell::attach_console();
-    let done = files_app::update::install().and_then(|dir| {
-        files_win::shell::add_to_user_path(&dir).map_err(|e| e.to_string())?;
-        Ok(dir)
-    });
     match done {
-        Ok(dir) => println!(
-            "\nInstalled to {}. Open a new terminal and run `files`.",
-            dir.display()
-        ),
-        Err(e) => eprintln!("\nInstall failed: {e}"),
+        Ok(text) => println!("\n{text}"),
+        Err(e) => eprintln!("\nFailed: {e}"),
     }
+    true
 }
 
 fn main() {
     let mut args: Vec<_> = std::env::args_os().skip(1).collect();
-    if args.first().is_some_and(|a| a == "--install") {
-        return install();
+    if args.first().is_some_and(|a| command(a)) {
+        return;
     }
     // Started by the update of a window that is closing right now.
     let after_update = args.first().is_some_and(|a| a == "--after-update");
@@ -42,7 +55,12 @@ fn main() {
     let start = args
         .into_iter()
         .next()
-        .map(PathBuf::from)
+        // Explorer passes a drive as `"C:\"`, which arrives as `C:"` (the
+        // backslash escapes the quote); `"` is never part of a Windows path.
+        .map(|a| match a.to_str().and_then(|s| s.strip_suffix('"')) {
+            Some(s) => PathBuf::from(format!("{s}\\")),
+            None => PathBuf::from(a),
+        })
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(r"C:\"));
     // `files .` from a terminal: relative to where it was typed.

@@ -1,0 +1,14 @@
+Windows Registry Editor Version 5.00
+
+; Makes Windows Explorer open folders, drives and Win+E again (undoes
+; `files --replace-explorer`). Double-click it if FilesProject cannot run.
+
+[-HKEY_CURRENT_USER\Software\Classes\Directory\shell\FilesProject]
+[HKEY_CURRENT_USER\Software\Classes\Directory\shell]
+@=-
+
+[-HKEY_CURRENT_USER\Software\Classes\Drive\shell\FilesProject]
+[HKEY_CURRENT_USER\Software\Classes\Drive\shell]
+@=-
+
+[-HKEY_CURRENT_USER\Software\Classes\CLSID\{52205fd8-5dfb-447d-801a-d0b52f2e83e1}\shell\opennewwindow]
