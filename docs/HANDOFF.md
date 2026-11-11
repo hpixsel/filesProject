@@ -55,7 +55,7 @@ session reads.
 
 ## Next step
 
-1.  Multiple selection (Ctrl/Shift+click) for copy, cut, delete and the
+1.  Done: multiple selection (Ctrl+click, Shift+click, Ctrl+A) for copy, cut, delete and the
     context menu. Today these work on one item at a time.
 2.  M3: tabs, multiple panes, favourites, and "copy path" without quotes.
 
