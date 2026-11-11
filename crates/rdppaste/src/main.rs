@@ -1,6 +1,6 @@
 //! `rdppaste`: paste files copied in an RDP session into a local folder.
 
-use files_core::{ConflictPolicy, Problem, Progress};
+use files_core::{machine, ConflictPolicy, Problem, Progress};
 use files_jobs::{paste, JobError, Outcome, STALL_TIMEOUT};
 use files_win::{clipboard_object, formats, Error, Sta};
 use std::io::Write;
@@ -15,7 +15,7 @@ const USAGE: &str = "\
 Paste files copied (Ctrl+C) in an RDP session into a local folder.
 
 Usage:
-  rdppaste <target-dir> [--overwrite]
+  rdppaste <target-dir> [--overwrite] [--machine]
   rdppaste --formats     list the formats currently on the clipboard
   rdppaste --help
 
@@ -34,15 +34,25 @@ fn main() {
 
 fn run() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    match args[..] {
-        ["--help"] | ["-h"] => {
+    let (flags, dirs): (Vec<&str>, Vec<&str>) = args
+        .iter()
+        .map(String::as_str)
+        .partition(|a| a.starts_with('-'));
+    let known = ["--overwrite", "--machine"];
+    match (&flags[..], &dirs[..]) {
+        (["--help"] | ["-h"], []) => {
             println!("{USAGE}");
             0
         }
-        ["--formats"] => list_formats(),
-        [dir] if !dir.starts_with('-') => paste_into(dir, ConflictPolicy::Fail),
-        [dir, "--overwrite"] | ["--overwrite", dir] => paste_into(dir, ConflictPolicy::Overwrite),
+        (["--formats"], []) => list_formats(),
+        (flags, [dir]) if flags.iter().all(|f| known.contains(f)) => {
+            let policy = if flags.contains(&"--overwrite") {
+                ConflictPolicy::Overwrite
+            } else {
+                ConflictPolicy::Fail
+            };
+            paste_into(dir, policy, flags.contains(&"--machine"))
+        }
         _ => {
             eprintln!("{USAGE}");
             64
@@ -96,26 +106,44 @@ fn list_formats() -> i32 {
     }
 }
 
-fn paste_into(dir: &str, policy: ConflictPolicy) -> i32 {
-    info!(target = dir, ?policy, "paste started");
+fn paste_into(dir: &str, policy: ConflictPolicy, machine: bool) -> i32 {
+    info!(target = dir, ?policy, machine, "paste started");
     let job = paste(PathBuf::from(dir), policy);
     let token = job.cancel_token();
+    if machine {
+        // Protocol (files_core::machine): stdin closing, or the parent dying, means cancel.
+        let token = token.clone();
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+            token.cancel();
+        });
+    }
     if let Err(e) = ctrlc::set_handler(move || token.cancel()) {
         tracing::warn!("Ctrl+C will not cancel cleanly: {e}");
     }
 
+    let show = |p: &Progress| {
+        if machine {
+            println!("{}", machine::progress_line(p));
+            let _ = std::io::stdout().flush();
+        } else {
+            print_progress(p);
+        }
+    };
     let mut last = Progress::default();
     let mut printed: Option<Instant> = None;
     let outcome = job.wait(|p| {
         last = p.clone();
         if printed.is_none_or(|t| t.elapsed() >= PRINT_EVERY) {
-            print_progress(p);
+            show(p);
             printed = Some(Instant::now());
         }
     });
     if printed.is_some() {
-        print_progress(&last);
-        println!();
+        show(&last);
+        if !machine {
+            println!();
+        }
     }
     let completed = format!("{}/{} files completed", last.files_done, last.files_total);
 
@@ -163,6 +191,10 @@ fn paste_into(dir: &str, policy: ConflictPolicy) -> i32 {
         }
     };
     info!(code, %message, "paste finished");
+    if machine {
+        println!("{}", machine::result_line(code, &message));
+        let _ = std::io::stdout().flush();
+    }
     code
 }
 

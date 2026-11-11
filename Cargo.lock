@@ -53,6 +53,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "files-app"
+version = "0.1.0"
+
+[[package]]
 name = "files-core"
 version = "0.1.0"
 

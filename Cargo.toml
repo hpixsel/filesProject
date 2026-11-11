@@ -11,6 +11,7 @@ repository = "https://github.com/hpixsel/filesProject"
 files-core = { path = "crates/files-core" }
 files-win = { path = "crates/files-win" }
 files-jobs = { path = "crates/files-jobs" }
+files-app = { path = "crates/files-app" }
 tracing = "=0.1.44"
 tracing-subscriber = "=0.3.23"
 ctrlc = "=3.5.2"
