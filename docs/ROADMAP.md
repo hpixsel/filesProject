@@ -40,7 +40,7 @@ Each milestone gets its own design document in `docs/designs/`.
 
 ## M5: Windows integration
 
-- [x] mapping network drives (Windows' own map / disconnect dialogs; to test on a home network)
+- [x] mapping network drives (Windows' own map / disconnect dialogs; tested on the home network)
 - [x] native context menu (since M1)
 
 ## M6: optional extras (each can be turned off)
@@ -61,3 +61,4 @@ Each milestone gets its own design document in `docs/designs/`.
 - [x] F2 / context-menu rename in the row; folder background menu
 - [x] sorting, type to jump, Explorer's keys, new folder
 - [x] hidden files setting; `.lnk`/`.url` shortcuts; Windows icons; hover preview
+- [x] address bar as clickable levels (crumbs), click the empty space to type

@@ -1587,7 +1587,7 @@ dependencies = [
 
 [[package]]
 name = "files-ui-gpui"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "embed-resource",
  "files-app",
@@ -5177,7 +5177,7 @@ dependencies = [
 
 [[package]]
 name = "rdppaste"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "ctrlc",
  "files-core",

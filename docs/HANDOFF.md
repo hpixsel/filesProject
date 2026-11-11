@@ -89,8 +89,7 @@ session reads.
     dialog). Network drives show a network icon and their share, muted
     (`WNetGetConnectionW`). The dialogs are modal, so they run in a spawned
     task outside GPUI's dispatch.
-    *   **Owner check:** the share shows. Mapping and disconnecting are not
-        tested yet (the owner was away from the home network).
+    *   **Owner check:** works, on the home network too (2026-11-11).
     *   **Known limit:** the drive list is read at start and after those
         dialogs, not when a drive appears elsewhere (USB stick, Explorer).
 5.  **M6 CLI (branch `m6-cli`), tested by hand by the owner:**
@@ -184,9 +183,14 @@ session reads.
     *   **Windows' icons** for programs and shortcuts and a **hover preview**
         (photos, videos, PDFs through PowerToys) via `IShellItemImageFactory`
         (`shell::shell_image`), loaded off the UI thread.
-12. **Next:** the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1), network
-    drives on the home network, dragging files out to other apps if wanted,
-    then whatever the owner asks for next.
+12. **Address crumbs (v0.7.0, tested by hand by the owner):** the address is
+    clickable levels (This PC › C: › ... › folder), like FilePilot: click to
+    go, middle-click for a tab, drop files on a level, a tooltip with the
+    full path. Clicking the empty space (or Ctrl+L / Alt+D / F4) shows the
+    path to type; Enter goes, Esc or clicking away returns. Long paths hide
+    levels after "This PC" once the names pass about 90 characters.
+13. **Next:** the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1), dragging
+    files out to other apps if wanted, then whatever the owner asks for next.
 
 ## Open questions
 

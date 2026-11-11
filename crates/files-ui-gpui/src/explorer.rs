@@ -1265,9 +1265,15 @@ impl Explorer {
                 }
             }
         }
-        // A long path keeps its start and its last levels.
-        const KEEP: usize = 5;
-        let hidden = levels.len().saturating_sub(KEEP + 1);
+        // A long path hides levels after "This PC", oldest first, until the
+        // rest fits about 90 characters (shortcut: a character budget, not
+        // the bar's width; measure the text if it misjudges).
+        let len =
+            |l: &[(String, PathBuf)]| l.iter().map(|(n, _)| n.chars().count() + 3).sum::<usize>();
+        let mut hidden = 0;
+        while levels.len() - hidden > 3 && len(&levels[hidden + 1..]) + 5 > 90 {
+            hidden += 1;
+        }
         let last = levels.len() - 1;
         let mut bar = div()
             .id("crumbs")
