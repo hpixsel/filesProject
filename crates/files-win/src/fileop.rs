@@ -13,8 +13,9 @@ use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::{OleFlushClipboard, OleGetClipboard, OleSetClipboard, CF_HDROP};
 use windows::Win32::UI::Shell::{
-    BHID_DataObject, FileOperation, IFileOperation, IShellItem, SHCreateItemFromParsingName,
-    CFSTR_PREFERREDDROPEFFECT, FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FOF_NOCONFIRMMKDIR,
+    BHID_DataObject, FileOperation, IFileOperation, IShellItem, IShellItemArray,
+    SHCreateItemFromParsingName, SHCreateShellItemArrayFromIDLists, CFSTR_PREFERREDDROPEFFECT,
+    FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FOF_NOCONFIRMMKDIR,
 };
 
 const DROPEFFECT_MOVE: u32 = 2;
@@ -32,12 +33,19 @@ pub fn clipboard_has_paths() -> bool {
     unsafe { IsClipboardFormatAvailable(u32::from(CF_HDROP.0)).is_ok() }
 }
 
-/// Puts `path` on the clipboard the way Explorer does, so it can be pasted
-/// here or in Explorer. `cut` marks it to be moved on paste.
-pub fn set_clipboard(_sta: &Sta, path: &Path, cut: bool) -> Result<()> {
-    // SAFETY: shell data object for one item; HGLOBAL ownership passes to SetData.
+/// The items as one shell item array (they share a folder).
+fn item_array(paths: &[PathBuf]) -> Result<IShellItemArray> {
+    let pidls = crate::shell::Pidls::parse(paths)?;
+    // SAFETY: the PIDLs stay alive until `pidls` drops, after the call.
+    Ok(unsafe { SHCreateShellItemArrayFromIDLists(&pidls.as_slice())? })
+}
+
+/// Puts `paths` on the clipboard the way Explorer does, so they can be
+/// pasted here or in Explorer. `cut` marks them to be moved on paste.
+pub fn set_clipboard(_sta: &Sta, paths: &[PathBuf], cut: bool) -> Result<()> {
+    // SAFETY: shell data object for the items; HGLOBAL ownership passes to SetData.
     unsafe {
-        let data: IDataObject = item(path)?.BindToHandler(None, &BHID_DataObject)?;
+        let data: IDataObject = item_array(paths)?.BindToHandler(None, &BHID_DataObject)?;
         if cut {
             let h = GlobalAlloc(GMEM_MOVEABLE, 4)?;
             *(GlobalLock(h) as *mut u32) = DROPEFFECT_MOVE;
@@ -57,7 +65,7 @@ pub fn set_clipboard(_sta: &Sta, path: &Path, cut: bool) -> Result<()> {
             };
             data.SetData(&fmt, &medium, true)?;
         }
-        OleSetClipboard(&data)?;
+        crate::clipboard::retry_open(|| OleSetClipboard(&data))?;
         // Render now, so the clipboard survives this program closing.
         let _ = OleFlushClipboard();
     }
@@ -134,18 +142,27 @@ fn on_ole_thread(
 pub fn paste_paths(window: isize, target: PathBuf, done: impl FnOnce(Result<()>) + Send + 'static) {
     on_ole_thread(
         move |_sta| {
-            // SAFETY: called on this thread's apartment.
-            let data = unsafe { OleGetClipboard()? };
-            transfer_now(window, &data.cast()?, &target, wants_move(&data))
+            // Windows' engine opens the clipboard itself while reading the
+            // items; if another process holds it, nothing was copied yet, so
+            // the whole operation is retried.
+            crate::clipboard::retry_open(|| {
+                // SAFETY: called on this thread's apartment.
+                let data = unsafe { OleGetClipboard()? };
+                match transfer_now(window, &data.cast()?, &target, wants_move(&data)) {
+                    Err(crate::Error::Win(e)) => Err(e),
+                    Err(other) => Ok(Err(other)),
+                    Ok(()) => Ok(Ok(())),
+                }
+            })?
         },
         done,
     );
 }
 
-/// Deletes `path`: to the Recycle Bin, or for good when `permanent`.
+/// Deletes `paths`: to the Recycle Bin, or for good when `permanent`.
 pub fn delete(
     window: isize,
-    path: PathBuf,
+    paths: Vec<PathBuf>,
     permanent: bool,
     done: impl FnOnce(Result<()>) + Send + 'static,
 ) {
@@ -159,7 +176,7 @@ pub fn delete(
             // SAFETY: COM calls on this thread's apartment.
             unsafe {
                 let op = operation(window, flags)?;
-                op.DeleteItem(&item(&path)?, None)?;
+                op.DeleteItems(&item_array(&paths)?)?;
                 op.PerformOperations()?;
             }
             Ok(())

@@ -10,7 +10,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::table::*;
 use gpui_kit::component::*;
 use gpui_kit::*;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::BufRead;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -31,7 +31,8 @@ actions!(
         CutSel,
         DeleteSel,
         DeleteForever,
-        OpenSel
+        OpenSel,
+        SelectAll
     ]
 );
 
@@ -49,6 +50,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("delete", DeleteSel, Some(CONTEXT)),
         KeyBinding::new("shift-delete", DeleteForever, Some(CONTEXT)),
         KeyBinding::new("enter", OpenSel, Some(CONTEXT)),
+        KeyBinding::new("ctrl-a", SelectAll, Some(CONTEXT)),
     ]);
 }
 
@@ -73,6 +75,20 @@ pub struct Listing {
     changed: Arc<AtomicBool>,
     /// Folder sizes filled in by the background scan.
     sizes: Arc<Mutex<HashMap<PathBuf, u64>>>,
+    /// Rows selected with Ctrl/Shift+click (or the single selected row).
+    marked: BTreeSet<usize>,
+    /// Where a Shift+click range starts.
+    anchor: Option<usize>,
+}
+
+impl Listing {
+    fn marked_paths(&self) -> Vec<PathBuf> {
+        self.marked
+            .iter()
+            .filter_map(|&i| self.items.get(i))
+            .map(|i| i.path.clone())
+            .collect()
+    }
 }
 
 impl TableDelegate for Listing {
@@ -93,23 +109,58 @@ impl TableDelegate for Listing {
         &mut self,
         row_ix: usize,
         _: &mut Window,
-        _: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
-        let path = self.items.get(row_ix).map(|i| i.path.clone());
-        let changed = self.changed.clone();
-        div()
-            .id(("row", row_ix))
-            .on_mouse_down(MouseButton::Right, move |_, window, cx| {
-                let (Some(h), Some(path)) = (hwnd(window), path.clone()) else {
-                    return;
-                };
-                let changed = changed.clone();
-                outside_dispatch(cx, move || {
-                    if let Ok(true) = files_win::shell::context_menu(h, &path) {
-                        changed.store(true, Ordering::SeqCst);
+        let marked = self.marked.contains(&row_ix) && self.marked.len() > 1;
+        let row = div().id(("row", row_ix));
+        let row = if marked {
+            row.bg(cx.theme().table_active)
+        } else {
+            row
+        };
+        row
+            // Ctrl+click toggles a row, Shift+click selects a range; plain
+            // clicks and arrow keys arrive as TableEvent::SelectRow.
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |t, e: &MouseDownEvent, _, cx| {
+                    let l = t.delegate_mut();
+                    if e.modifiers.shift {
+                        let from = l.anchor.unwrap_or(row_ix);
+                        l.marked = (from.min(row_ix)..=from.max(row_ix)).collect();
+                    } else if e.modifiers.control {
+                        if !l.marked.remove(&row_ix) {
+                            l.marked.insert(row_ix);
+                        }
+                        l.anchor = Some(row_ix);
+                    } else {
+                        return;
                     }
-                });
-            })
+                    cx.notify();
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |t, _: &MouseDownEvent, window, cx| {
+                    let l = t.delegate_mut();
+                    // Like Explorer: right-clicking outside the selection selects that row.
+                    if !l.marked.contains(&row_ix) {
+                        l.marked = [row_ix].into();
+                        l.anchor = Some(row_ix);
+                    }
+                    let paths = l.marked_paths();
+                    let (Some(h), false) = (hwnd(window), paths.is_empty()) else {
+                        return;
+                    };
+                    let changed = l.changed.clone();
+                    cx.notify();
+                    outside_dispatch(cx, move || {
+                        if let Ok(true) = files_win::shell::context_menu(h, &paths) {
+                            changed.store(true, Ordering::SeqCst);
+                        }
+                    });
+                }),
+            )
     }
     fn render_td(
         &mut self,
@@ -191,13 +242,25 @@ impl Explorer {
             items: Vec::new(),
             changed: changed.clone(),
             sizes: Default::default(),
+            marked: Default::default(),
+            anchor: None,
         };
-        let table = cx.new(|cx| TableState::new(listing, window, cx));
+        // Ctrl/Shift+click is ours (Listing::marked), not the table's single row.
+        let table =
+            cx.new(|cx| TableState::new(listing, window, cx).select_on_modifier_click(false));
         let address = cx.new(|cx| InputState::new(window, cx));
 
         cx.subscribe_in(&table, window, |this, _, ev: &TableEvent, window, cx| {
-            if let TableEvent::DoubleClickedRow(ix) = ev {
-                this.open_row(*ix, window, cx);
+            match ev {
+                TableEvent::DoubleClickedRow(ix) => this.open_row(*ix, window, cx),
+                // A plain click or arrow key: the selection becomes this row.
+                TableEvent::SelectRow(ix) => this.table.update(cx, |t, cx| {
+                    let l = t.delegate_mut();
+                    l.marked = [*ix].into();
+                    l.anchor = Some(*ix);
+                    cx.notify();
+                }),
+                _ => {}
             }
         })
         .detach();
@@ -282,6 +345,8 @@ impl Explorer {
                         this.table.update(cx, |t, cx| {
                             t.delegate_mut().items = items;
                             t.delegate_mut().sizes = sizes;
+                            t.delegate_mut().marked.clear();
+                            t.delegate_mut().anchor = None;
                             t.refresh(cx);
                         });
                     }
@@ -339,21 +404,36 @@ impl Explorer {
         files_win::fileop::paste_paths(h, dir, report);
     }
 
-    fn selected(&self, cx: &App) -> Option<Item> {
+    /// The selected items: the marked rows, or the table's current row.
+    fn selected(&self, cx: &App) -> Vec<PathBuf> {
         let table = self.table.read(cx);
-        let ix = table.selected_row()?;
-        table.delegate().items.get(ix).cloned()
+        let marked = table.delegate().marked_paths();
+        if !marked.is_empty() {
+            return marked;
+        }
+        let row = table
+            .selected_row()
+            .and_then(|ix| table.delegate().items.get(ix));
+        row.map(|i| vec![i.path.clone()]).unwrap_or_default()
     }
 
     fn copy_selected(&mut self, cut: bool, cx: &mut Context<Self>) {
-        let Some(item) = self.selected(cx) else {
+        let paths = self.selected(cx);
+        if paths.is_empty() {
             return;
-        };
+        }
         let result = files_win::Sta::new()
-            .and_then(|sta| files_win::fileop::set_clipboard(&sta, &item.path, cut));
+            .and_then(|sta| files_win::fileop::set_clipboard(&sta, &paths, cut));
+        let what = match &paths[..] {
+            [one] => one
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            many => format!("{} items", many.len()),
+        };
         self.notice = match result {
-            Ok(()) if cut => format!("Cut {}", item.name).into(),
-            Ok(()) => format!("Copied {}", item.name).into(),
+            Ok(()) if cut => format!("Cut {what}").into(),
+            Ok(()) => format!("Copied {what}").into(),
             Err(e) => format!("Cannot copy: {e}").into(),
         };
         cx.notify();
@@ -367,11 +447,14 @@ impl Explorer {
     }
 
     fn delete_selected(&mut self, permanent: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let (Some(item), Some(h)) = (self.selected(cx), hwnd(window)) else {
+        let (paths, Some(h)) = (self.selected(cx), hwnd(window)) else {
             return;
         };
+        if paths.is_empty() {
+            return;
+        }
         let report = self.report_done("Delete");
-        files_win::fileop::delete(h, item.path, permanent, report);
+        files_win::fileop::delete(h, paths, permanent, report);
     }
 
     fn delete_sel(&mut self, _: &DeleteSel, window: &mut Window, cx: &mut Context<Self>) {
@@ -379,6 +462,14 @@ impl Explorer {
     }
     fn delete_forever(&mut self, _: &DeleteForever, window: &mut Window, cx: &mut Context<Self>) {
         self.delete_selected(true, window, cx);
+    }
+
+    fn select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+        self.table.update(cx, |t, cx| {
+            let l = t.delegate_mut();
+            l.marked = (0..l.items.len()).collect();
+            cx.notify();
+        });
     }
 
     fn open_sel(&mut self, _: &OpenSel, window: &mut Window, cx: &mut Context<Self>) {
@@ -688,6 +779,7 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::delete_sel))
             .on_action(cx.listener(Self::delete_forever))
             .on_action(cx.listener(Self::open_sel))
+            .on_action(cx.listener(Self::select_all))
             .text_color(cx.theme().foreground)
             .child(TitleBar::new().child(div().pl_2().child("FilesProject")))
             .child(toolbar)

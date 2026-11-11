@@ -27,18 +27,26 @@ fn copy_then_cut_and_paste() {
     let (src, dst) = (tmp("fileop-src"), tmp("fileop-dst"));
     std::fs::write(src.join("a.txt"), "alpha").unwrap();
     std::fs::write(src.join("b.txt"), "bravo").unwrap();
+    std::fs::write(src.join("c.txt"), "charlie").unwrap();
     let sta = Sta::new().unwrap();
 
-    fileop::set_clipboard(&sta, &src.join("a.txt"), false).unwrap();
+    fileop::set_clipboard(&sta, &[src.join("a.txt")], false).unwrap();
     assert!(fileop::clipboard_has_paths());
     paste_into(dst.clone());
     assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "alpha");
     assert!(src.join("a.txt").exists(), "copy keeps the source");
 
-    fileop::set_clipboard(&sta, &src.join("b.txt"), true).unwrap();
+    fileop::set_clipboard(&sta, &[src.join("b.txt"), src.join("c.txt")], true).unwrap();
     paste_into(dst.clone());
     assert_eq!(std::fs::read_to_string(dst.join("b.txt")).unwrap(), "bravo");
-    assert!(!src.join("b.txt").exists(), "cut moves the source");
+    assert_eq!(
+        std::fs::read_to_string(dst.join("c.txt")).unwrap(),
+        "charlie"
+    );
+    assert!(
+        !src.join("b.txt").exists() && !src.join("c.txt").exists(),
+        "cut moves both"
+    );
 
     // SAFETY: clears the clipboard this test filled.
     unsafe { windows::Win32::System::Ole::OleSetClipboard(None).unwrap() };
