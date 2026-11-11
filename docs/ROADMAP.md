@@ -35,7 +35,7 @@ Each milestone gets its own design document in `docs/designs/`.
 
 - [x] themes: dark, light, wallpaper-based (the Windows accent colour), any accent colour
 - [x] density: normal, compact, very compact
-- [ ] later, in a settings page: user-adjustable density steps
+- [x] user-adjustable density steps (text size per level, settings panel)
 - [x] Polish and English UI (rdppaste's own messages stay English)
 
 ## M5: Windows integration
@@ -51,4 +51,4 @@ Each milestone gets its own design document in `docs/designs/`.
 - [x] replacing Windows Explorer (folders, drives, Win+E), with `--restore-explorer` and `restore-explorer.reg`
 - [x] This PC (drive tiles) and the Recycle Bin (restore, delete, empty), also taken over from Explorer
 - [x] middle click: open a folder in a new tab, close a tab; tabs remembered between runs
-- [ ] later, on a settings page: toggles for the Explorer replacement and remembered tabs, density steps
+- [x] settings panel: Explorer replacement and remembered tabs toggles; window size and position remembered

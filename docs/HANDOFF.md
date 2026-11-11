@@ -144,9 +144,22 @@ session reads.
         click also reached the tab).
     *   `--replace-explorer` now also takes This PC and the Recycle Bin;
         whether the desktop icons use that verb is still to test.
-10. **Next:** a settings page (density steps, Explorer toggle, restore
-    tabs), the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1), network
-    drives on the home network.
+10. **Settings panel and window (v0.5.0, tested by hand by the owner):**
+    *   **Settings** are GPUI global state (`src/prefs.rs`): every change
+        applies at once and is saved. The panel (`src/settings_page.rs`,
+        gpui-kit's `Settings` in a sheet, the gear in the title bar) has
+        mode, accent (picker, "from Windows / wallpaper"), density and a
+        text size per density (`fonts` in `settings.txt`), language,
+        remembered tabs, and the Explorer replacement switch (installed copy
+        only; `replace_explorer::is_on` = the backup folder exists).
+    *   **Title bar:** favourite, split, light/dark, settings.
+    *   **Window position, size and maximized state** are saved with the tabs
+        in `session.txt` and restored at start.
+    *   **Lesson:** closing the window (X, Alt+F4, taskbar) does not quit the
+        app, so `on_app_quit` never ran; saving now also happens in
+        `on_window_should_close` and the title bar's close handler.
+11. **Next:** the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1), network
+    drives on the home network, then whatever the owner asks for next.
 
 ## Open questions
 
