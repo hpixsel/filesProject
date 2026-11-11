@@ -547,11 +547,7 @@ impl Workspace {
                 "Ctrl+Alt+C",
                 Box::new(e::CopyPath),
             ),
-            cmd(
-                tr!("Paste from RDP", "Wklej z RDP"),
-                "Ctrl+V",
-                Box::new(e::PasteHere),
-            ),
+            cmd(tr!("Paste", "Wklej"), "Ctrl+V", Box::new(e::PasteHere)),
             cmd(
                 tr!("Properties", "Właściwości"),
                 "Alt+Enter",

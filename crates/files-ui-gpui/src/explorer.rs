@@ -2948,15 +2948,7 @@ impl Render for Explorer {
                         .label(tr!("Empty Recycle Bin", "Opróżnij kosz"))
                         .on_click(cx.listener(|this, _, w, cx| this.empty_bin(w, cx))),
                 )
-            })
-            .child(
-                Button::new("paste")
-                    .cursor_pointer()
-                    .primary()
-                    .label(tr!("Paste from RDP", "Wklej z RDP"))
-                    .tooltip("Ctrl+V")
-                    .on_click(cx.listener(|this, _, w, cx| this.paste_here(&PasteHere, w, cx))),
-            );
+            });
 
         let mut status = div()
             .h_flex()
