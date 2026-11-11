@@ -115,6 +115,8 @@ as an ADR.
     their old colours.
 *   **Window backdrop:**
     *   The owner chose **Blurred** (glass) as the default.
+        M4 replaced it with DWM acrylic (`DWMSBT_TRANSIENTWINDOW`), because
+        `Blurred` lagged while the window was dragged.
     *   Mica and Mica Alt look almost opaque on this machine, because Mica
         samples the static system wallpaper and the live wallpaper comes
         from Wallpaper Engine.

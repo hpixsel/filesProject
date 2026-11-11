@@ -18,6 +18,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::i18n::{self, tr};
+use crate::theme;
+
 actions!(
     files,
     [
@@ -102,9 +105,9 @@ impl TableDelegate for Listing {
     }
     fn column(&self, col_ix: usize, _: &App) -> Column {
         match col_ix {
-            0 => Column::new("name", "Name").width(px(440.)),
-            1 => Column::new("size", "Size").width(px(110.)),
-            _ => Column::new("modified", "Modified").width(px(160.)),
+            0 => Column::new("name", tr!("Name", "Nazwa")).width(px(440.)),
+            1 => Column::new("size", tr!("Size", "Rozmiar")).width(px(110.)),
+            _ => Column::new("modified", tr!("Modified", "Zmodyfikowano")).width(px(160.)),
         }
     }
     fn render_tr(
@@ -231,6 +234,8 @@ pub struct Explorer {
     changed: Arc<AtomicBool>,
     /// Outcome of a file operation finished on another thread.
     thread_notice: Arc<Mutex<Option<String>>>,
+    /// Language the column headers were built in.
+    polish: bool,
     focus: FocusHandle,
 }
 
@@ -273,7 +278,12 @@ impl Explorer {
                         this.history.go(typed);
                         this.load(window, cx);
                     } else {
-                        this.status = format!("Not a folder: {}", typed.display()).into();
+                        this.status = tr!(
+                            "Not a folder: {}",
+                            "To nie jest folder: {}",
+                            typed.display()
+                        )
+                        .into();
                         cx.notify();
                     }
                 }
@@ -306,6 +316,7 @@ impl Explorer {
             conflict: None,
             changed,
             thread_notice: Default::default(),
+            polish: i18n::polish(),
             focus: cx.focus_handle(),
         };
         this.load(window, cx);
@@ -317,7 +328,7 @@ impl Explorer {
         let shown = dir.display().to_string();
         self.address
             .update(cx, |a, cx| a.set_value(shown, window, cx));
-        self.status = "Loading…".into();
+        self.status = tr!("Loading…", "Wczytywanie…").into();
         cx.notify();
         let task = cx.background_spawn(async move { list_dir(&dir) });
         cx.spawn_in(window, async move |this, cx| {
@@ -325,7 +336,7 @@ impl Explorer {
             let _ = this.update(cx, |this, cx| {
                 match listed {
                     Ok(items) => {
-                        this.status = format!("{} items", items.len()).into();
+                        this.status = tr!("{} items", "Elementów: {}", items.len()).into();
                         let dirs = items.iter().filter(|i| i.is_dir).map(|i| i.path.clone());
                         // Replacing the scan drops (cancels) the previous folder's one.
                         let scan = scan_sizes(dirs.collect());
@@ -339,7 +350,10 @@ impl Explorer {
                             t.refresh(cx);
                         });
                     }
-                    Err(e) => this.status = format!("Cannot open folder: {e}").into(),
+                    Err(e) => {
+                        this.status =
+                            tr!("Cannot open folder: {e}", "Nie można otworzyć folderu: {e}").into()
+                    }
                 }
                 cx.notify();
             });
@@ -389,7 +403,7 @@ impl Explorer {
         }
         let Some(h) = hwnd(window) else { return };
         let dir = self.history.current().to_path_buf();
-        let report = self.report_done("Paste");
+        let report = self.report_done(tr!("Paste", "Wklejanie"));
         files_win::fileop::paste_paths(h, dir, report);
     }
 
@@ -418,12 +432,12 @@ impl Explorer {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            many => format!("{} items", many.len()),
+            many => tr!("{} items", "elementy: {}", many.len()),
         };
         self.notice = match result {
-            Ok(()) if cut => format!("Cut {what}").into(),
-            Ok(()) => format!("Copied {what}").into(),
-            Err(e) => format!("Cannot copy: {e}").into(),
+            Ok(()) if cut => tr!("Cut {what}", "Wycięto {what}").into(),
+            Ok(()) => tr!("Copied {what}", "Skopiowano {what}").into(),
+            Err(e) => tr!("Cannot copy: {e}", "Nie można skopiować: {e}").into(),
         };
         cx.notify();
     }
@@ -442,7 +456,7 @@ impl Explorer {
         if paths.is_empty() {
             return;
         }
-        let report = self.report_done("Delete");
+        let report = self.report_done(tr!("Delete", "Usuwanie"));
         files_win::fileop::delete(h, paths, permanent, report);
     }
 
@@ -469,16 +483,13 @@ impl Explorer {
 
     /// Callback for a file operation running on its own thread: records the
     /// outcome and asks the next poll to reload the folder.
-    pub fn report_done(
-        &self,
-        what: &'static str,
-    ) -> impl Fn(files_win::Result<()>) + Send + 'static {
+    pub fn report_done(&self, what: String) -> impl Fn(files_win::Result<()>) + Send + 'static {
         let (changed, notice) = (self.changed.clone(), self.thread_notice.clone());
         move |r| {
             // A cancelled Windows dialog returns an error too; say so plainly.
             let text = match r {
-                Ok(()) => format!("{what} done"),
-                Err(e) => format!("{what} did not finish: {e}"),
+                Ok(()) => tr!("{what} done", "{what}: gotowe"),
+                Err(e) => tr!("{what} did not finish: {e}", "{what}: nie ukończono: {e}"),
             };
             *notice.lock().unwrap() = Some(text);
             changed.store(true, Ordering::SeqCst);
@@ -490,16 +501,22 @@ impl Explorer {
     fn start(&mut self, flag: Option<&'static str>, cx: &mut Context<Self>) {
         self.conflict = None;
         if self.paste.is_some() {
-            self.notice = "A paste is already running.".into();
+            self.notice = tr!("A paste is already running.", "Wklejanie już trwa.").into();
             cx.notify();
             return;
         }
         match start_paste(self.history.current(), flag) {
             Ok(state) => {
                 self.paste = Some(state);
-                self.notice = "Pasting…".into();
+                self.notice = tr!("Pasting…", "Wklejanie…").into();
             }
-            Err(e) => self.notice = format!("Cannot start rdppaste: {e}").into(),
+            Err(e) => {
+                self.notice = tr!(
+                    "Cannot start rdppaste: {e}",
+                    "Nie można uruchomić rdppaste: {e}"
+                )
+                .into()
+            }
         }
         cx.notify();
     }
@@ -532,14 +549,14 @@ impl Explorer {
                 0 => message.into(),
                 // e.g. NanaZip/7-Zip or a plain Explorer copy put real paths
                 // (CF_HDROP) on the clipboard, not virtual files.
-                4 if message.contains("CF_HDROP") => "These are regular files, not files from an RDP session or a zip. Pasting regular files comes with local copy (M2).".into(),
-                4 => "The clipboard holds no files. Copy files (Ctrl+C) in Explorer or in the RDP session first.".into(),
+                4 if message.contains("CF_HDROP") => tr!("These are regular files, not files from an RDP session or a zip.", "To zwykłe pliki, nie pliki z sesji RDP ani z archiwum zip.").into(),
+                4 => tr!("The clipboard holds no files. Copy files (Ctrl+C) in Explorer or in the RDP session first.", "Schowek nie zawiera plików. Najpierw skopiuj pliki (Ctrl+C) w Eksploratorze lub w sesji RDP.").into(),
                 // rdppaste exit code 5: files already exist, nothing written.
                 5 => {
                     self.conflict = Some(message.into());
                     SharedString::default()
                 }
-                _ => format!("Paste failed: {message}").into(),
+                _ => tr!("Paste failed: {message}", "Wklejanie nie powiodło się: {message}").into(),
             };
             if code == 0 {
                 self.load(window, cx);
@@ -571,7 +588,7 @@ impl Explorer {
 
     /// Where a drop's outcome goes: it reloads this tab and shows the result.
     pub fn drop_sink(&self) -> impl Fn(files_win::Result<()>) + 'static {
-        self.report_done("Drop")
+        self.report_done(tr!("Drop", "Upuszczanie"))
     }
 
     /// Ctrl+Alt+C: the selected paths (or the folder) as plain text, one
@@ -584,8 +601,8 @@ impl Explorer {
         let text: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
         cx.write_to_clipboard(ClipboardItem::new_string(text.join("\r\n")));
         self.notice = match &paths[..] {
-            [one] => format!("Copied path {}", one.display()).into(),
-            many => format!("Copied {} paths", many.len()).into(),
+            [one] => tr!("Copied path {}", "Skopiowano ścieżkę {}", one.display()).into(),
+            many => tr!("Copied {} paths", "Skopiowano ścieżki: {}", many.len()).into(),
         };
         cx.notify();
     }
@@ -639,6 +656,10 @@ fn start_paste(dir: &Path, flag: Option<&str>) -> std::io::Result<Arc<Mutex<Past
 
 impl Render for Explorer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.polish != i18n::polish() {
+            self.polish = i18n::polish();
+            self.table.update(cx, |t, cx| t.refresh(cx)); // column headers
+        }
         let muted = cx.theme().muted_foreground;
         let progress = self
             .paste
@@ -657,7 +678,7 @@ impl Render for Explorer {
                     .ghost()
                     .icon(IconName::ArrowLeft)
                     .disabled(!can_back)
-                    .tooltip("Back (Alt+Left)")
+                    .tooltip(tr!("Back (Alt+Left)", "Wstecz (Alt+Left)"))
                     .on_click(cx.listener(|this, _, w, cx| this.go_back(&GoBack, w, cx))),
             )
             .child(
@@ -666,7 +687,7 @@ impl Render for Explorer {
                     .ghost()
                     .icon(IconName::ArrowRight)
                     .disabled(!can_forward)
-                    .tooltip("Forward (Alt+Right)")
+                    .tooltip(tr!("Forward (Alt+Right)", "Dalej (Alt+Right)"))
                     .on_click(cx.listener(|this, _, w, cx| this.go_forward(&GoForward, w, cx))),
             )
             .child(
@@ -674,7 +695,7 @@ impl Render for Explorer {
                     .cursor_pointer()
                     .ghost()
                     .icon(IconName::ArrowUp)
-                    .tooltip("Up (Alt+Up)")
+                    .tooltip(tr!("Up (Alt+Up)", "W górę (Alt+Up)"))
                     .on_click(cx.listener(|this, _, w, cx| this.go_up(&GoUp, w, cx))),
             )
             .child(
@@ -682,7 +703,7 @@ impl Render for Explorer {
                     .cursor_pointer()
                     .ghost()
                     .icon(IconName::RefreshCw)
-                    .tooltip("Refresh (F5)")
+                    .tooltip(tr!("Refresh (F5)", "Odśwież (F5)"))
                     .on_click(cx.listener(|this, _, w, cx| this.refresh(&Refresh, w, cx))),
             )
             .child(div().flex_1().child(Input::new(&self.address)))
@@ -691,14 +712,17 @@ impl Render for Explorer {
                     .cursor_pointer()
                     .ghost()
                     .icon(IconName::Copy)
-                    .tooltip("Copy path without quotes (Ctrl+Alt+C)")
+                    .tooltip(tr!(
+                        "Copy path without quotes (Ctrl+Alt+C)",
+                        "Kopiuj ścieżkę bez cudzysłowów (Ctrl+Alt+C)"
+                    ))
                     .on_click(cx.listener(|this, _, w, cx| this.copy_path(&CopyPath, w, cx))),
             )
             .child(
                 Button::new("paste")
                     .cursor_pointer()
                     .primary()
-                    .label("Paste from RDP")
+                    .label(tr!("Paste from RDP", "Wklej z RDP"))
                     .tooltip("Ctrl+V")
                     .on_click(cx.listener(|this, _, w, cx| this.paste_here(&PasteHere, w, cx))),
             );
@@ -723,9 +747,10 @@ impl Render for Explorer {
                 .map(|t| p.bytes_done as f32 / t as f32);
             status = status
                 .child(format!(
-                    "{}/{} files, {}{}",
+                    "{}/{} {}, {}{}",
                     p.files_done,
                     p.files_total,
+                    tr!("files", "plików"),
                     format_size(p.bytes_done),
                     pct.map(|f| format!(" ({:.0}%)", f * 100.))
                         .unwrap_or_default()
@@ -748,34 +773,39 @@ impl Render for Explorer {
                     Button::new("cancel")
                         .cursor_pointer()
                         .ghost()
-                        .label("Cancel")
+                        .label(tr!("Cancel", "Anuluj"))
                         .on_click(cx.listener(|this, _, _, _| this.cancel_paste())),
                 );
         }
         if let Some(message) = self.conflict.clone() {
-            let choice = |id: &'static str, label: &'static str, flag: &'static str| {
+            // rdppaste says "<n> file(s) already exist".
+            let count = message.split(' ').next().unwrap_or_default();
+            let choice = |id: &'static str, label: String, flag: &'static str| {
                 Button::new(id)
                     .cursor_pointer()
                     .label(label)
                     .on_click(cx.listener(move |this, _, _, cx| this.start(Some(flag), cx)))
             };
             status = status
-                .child(
-                    div()
-                        .text_color(cx.theme().foreground)
-                        .child(format!("{message}. What should happen to them?")),
-                )
-                .child(choice("replace", "Replace", "--overwrite").primary())
-                .child(choice("skip", "Skip existing", "--skip").outline())
-                .child(choice("both", "Keep both", "--rename").outline())
+                .child(div().text_color(cx.theme().foreground).child(tr!(
+                    "{message}. What should happen to them?",
+                    "Pliki już istnieją ({count}). Co z nimi zrobić?"
+                )))
+                .child(choice("replace", tr!("Replace", "Zastąp"), "--overwrite").primary())
+                .child(choice("skip", tr!("Skip existing", "Pomiń istniejące"), "--skip").outline())
+                .child(choice("both", tr!("Keep both", "Zachowaj oba"), "--rename").outline())
                 .child(
                     Button::new("dismiss")
                         .cursor_pointer()
                         .ghost()
-                        .label("Cancel")
+                        .label(tr!("Cancel", "Anuluj"))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.conflict = None;
-                            this.notice = "Paste cancelled; nothing was written.".into();
+                            this.notice = tr!(
+                                "Paste cancelled; nothing was written.",
+                                "Wklejanie anulowane; nic nie zapisano."
+                            )
+                            .into();
                             cx.notify();
                         })),
                 );
@@ -808,7 +838,7 @@ impl Render for Explorer {
                     .border_1()
                     .border_color(cx.theme().border)
                     .overflow_hidden()
-                    .child(DataTable::new(&self.table)),
+                    .child(DataTable::new(&self.table).with_size(theme::table_size())),
             )
             .child(div().pt_2().child(status))
     }

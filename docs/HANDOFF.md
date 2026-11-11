@@ -63,10 +63,29 @@ session reads.
 2.  **Layout lesson:** gpui-kit's `h_flex` centres children vertically.
     Use `flex().flex_row()` for rows that must stretch, plus `min_w_0` and
     `overflow_hidden` on panes.
-3.  **Next, M4:**
-    *   themes: wallpaper-based, and any accent colour (today: 5 presets);
-    *   density: normal, compact, very compact;
-    *   Polish and English UI.
+3.  **M4 (branch `m4`), tested by hand by the owner:**
+    *   **Settings:** `files_app::settings`, saved to
+        `%APPDATA%\FilesProject\settings.txt` (accent, dark, density, lang).
+    *   **Accent:** gpui-kit's colour picker in the title bar; hue and
+        saturation drive the palette (`theme::apply`). The frame button
+        follows the Windows accent colour (registry `DWM\AccentColor`),
+        which Windows takes from the wallpaper when set to Automatic.
+    *   **Density:** theme font size (16/14/13 px, scales rem paddings)
+        plus the table's own sizes (Medium/Small/XSmall). `Size::Size(px)`
+        drops cell text size and padding, so do not use it for the table.
+    *   **Language:** `tr!("English", "Polski")` at each call site
+        (`i18n.rs`); the default follows the Windows display language.
+    *   **Title-bar lesson:** the title bar starts a window move on mouse
+        down plus move, which swallowed button clicks. The button group
+        stops mouse-down propagation.
+    *   **No console window**, in debug builds too.
+    *   **Backdrop:** GPUI's `Blurred` is the old
+        `SetWindowCompositionAttribute` acrylic and lagged while dragging.
+        The window now asks for `MicaBackdrop` and `files_win::shell::set_acrylic`
+        switches it to Windows 11's DWM acrylic: smooth, and solid while the
+        window is inactive (the owner is fine with that).
+4.  **Next:** M5 (network drives), then M6 (CLI, updater, Explorer
+    replacement). Later, a settings page with adjustable density steps.
 
 ## Open questions
 

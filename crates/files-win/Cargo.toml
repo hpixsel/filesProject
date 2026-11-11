@@ -31,6 +31,9 @@ features = [
     "Win32_System_JobObjects",
     "Win32_Security",
     "Win32_System_SystemServices", # MODIFIERKEYS_FLAGS for IDropTarget
+    "Win32_System_Registry", # the Windows accent colour
+    "Win32_Globalization", # the display language
+    "Win32_Graphics_Dwm", # the acrylic backdrop
 ]
 
 [features]

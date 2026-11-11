@@ -33,9 +33,10 @@ Each milestone gets its own design document in `docs/designs/`.
 
 ## M4: appearance
 
-- [ ] themes: dark, light, wallpaper-based, accent colour
-- [ ] density: normal, compact, very compact
-- [ ] Polish and English UI
+- [x] themes: dark, light, wallpaper-based (the Windows accent colour), any accent colour
+- [x] density: normal, compact, very compact
+- [ ] later, in a settings page: user-adjustable density steps
+- [x] Polish and English UI (rdppaste's own messages stay English)
 
 ## M5: Windows integration
 
