@@ -7,6 +7,15 @@ name = "files-core"
 version = "0.1.0"
 
 [[package]]
+name = "files-jobs"
+version = "0.1.0"
+dependencies = [
+ "files-core",
+ "files-win",
+ "tracing",
+]
+
+[[package]]
 name = "files-win"
 version = "0.1.0"
 dependencies = [

@@ -261,6 +261,10 @@ impl FakeFiles {
                 }
             };
             if !name.is_empty() {
+                assert!(
+                    name.len() < 260,
+                    "fake names must fit the 260-unit descriptor field; use raw_name"
+                );
                 let mut cname = [0u16; 260];
                 cname[..name.len()].copy_from_slice(&name);
                 d.cFileName = cname;
