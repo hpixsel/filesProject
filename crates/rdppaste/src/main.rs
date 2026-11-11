@@ -15,11 +15,15 @@ const USAGE: &str = "\
 Paste files copied (Ctrl+C) in an RDP session into a local folder.
 
 Usage:
-  rdppaste <target-dir> [--overwrite] [--machine]
+  rdppaste <target-dir> [--overwrite | --skip | --rename] [--machine]
+      --overwrite  replace existing files
+      --skip       keep existing files, paste the rest
+      --rename     keep both; the pasted file becomes name (2).ext
   rdppaste --formats     list the formats currently on the clipboard
   rdppaste --help
 
-Exit codes: 0 done, 1 failed, 2 cancelled, 3 stalled, 4 no virtual files, 64 usage.";
+Exit codes: 0 done, 1 failed, 2 cancelled, 3 stalled, 4 no virtual files,
+5 files already exist (nothing written), 64 usage.";
 
 const PRINT_EVERY: Duration = Duration::from_millis(250);
 // shortcut: fixed width; read the console width if narrow terminals still wrap
@@ -38,7 +42,7 @@ fn run() -> i32 {
         .iter()
         .map(String::as_str)
         .partition(|a| a.starts_with('-'));
-    let known = ["--overwrite", "--machine"];
+    let known = ["--overwrite", "--skip", "--rename", "--machine"];
     match (&flags[..], &dirs[..]) {
         (["--help"] | ["-h"], []) => {
             println!("{USAGE}");
@@ -46,12 +50,23 @@ fn run() -> i32 {
         }
         (["--formats"], []) => list_formats(),
         (flags, [dir]) if flags.iter().all(|f| known.contains(f)) => {
-            let policy = if flags.contains(&"--overwrite") {
-                ConflictPolicy::Overwrite
-            } else {
-                ConflictPolicy::Fail
-            };
-            paste_into(dir, policy, flags.contains(&"--machine"))
+            let chosen: Vec<ConflictPolicy> = [
+                ("--overwrite", ConflictPolicy::Overwrite),
+                ("--skip", ConflictPolicy::Skip),
+                ("--rename", ConflictPolicy::Rename),
+            ]
+            .into_iter()
+            .filter(|(f, _)| flags.contains(f))
+            .map(|(_, p)| p)
+            .collect();
+            match chosen[..] {
+                [] => paste_into(dir, ConflictPolicy::Fail, flags.contains(&"--machine")),
+                [policy] => paste_into(dir, policy, flags.contains(&"--machine")),
+                _ => {
+                    eprintln!("Use only one of --overwrite, --skip, --rename.\n\n{USAGE}");
+                    64
+                }
+            }
         }
         _ => {
             eprintln!("{USAGE}");
@@ -149,8 +164,13 @@ fn paste_into(dir: &str, policy: ConflictPolicy, machine: bool) -> i32 {
 
     let (code, message) = match outcome {
         Outcome::Done(s) => {
+            let skipped = if s.files_skipped > 0 {
+                format!(", {} skipped (already there)", s.files_skipped)
+            } else {
+                String::new()
+            };
             let text = format!(
-                "Done: {} files, {} new folders, {}",
+                "Done: {} files{skipped}, {} new folders, {}",
                 s.files_written,
                 s.folders_created,
                 size(s.bytes)
@@ -171,7 +191,22 @@ fn paste_into(dir: &str, policy: ConflictPolicy, machine: bool) -> i32 {
             for p in &problems {
                 eprintln!("  {}", describe(p));
             }
-            (1, format!("{} problem(s) before writing", problems.len()))
+            let only_existing = problems.iter().all(|p| {
+                matches!(
+                    p,
+                    Problem::Conflict {
+                        overwritable: true,
+                        ..
+                    }
+                )
+            });
+            if only_existing {
+                // Exit code 5: the GUI asks overwrite / skip / keep both and runs again.
+                eprintln!("Run again with --overwrite, --skip or --rename.");
+                (5, format!("{} file(s) already exist", problems.len()))
+            } else {
+                (1, format!("{} problem(s) before writing", problems.len()))
+            }
         }
         Outcome::Failed(e) => {
             eprintln!("Failed: {e}\n{completed}");
@@ -249,7 +284,7 @@ fn describe(p: &Problem) -> String {
             path,
             overwritable: true,
         } => {
-            format!("already exists (use --overwrite): {}", path.display())
+            format!("already exists: {}", path.display())
         }
         Problem::Conflict {
             path,

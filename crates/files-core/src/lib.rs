@@ -4,7 +4,7 @@ pub mod check;
 pub mod machine;
 pub mod relpath;
 
-pub use check::{check, ConflictPolicy, Problem};
+pub use check::{check, numbered, ConflictPolicy, Problem};
 pub use relpath::{BadName, RelPath};
 
 use std::time::SystemTime;

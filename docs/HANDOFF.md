@@ -41,11 +41,13 @@ session reads.
 
 ## Next step
 
-1.  Merge `m1`, once CI is green on the PR.
-2.  Finish M1: interactive conflict handling (Q5) instead of "already
-    exists".
-3.  M2: the job queue, local copy, move and delete, and background folder
-    sizes.
+1.  M1 is complete; conflict handling (Q5) was merged with branch
+    `m1-conflicts`.
+2.  M2: the job queue, plus local copy, move and delete. This includes
+    pasting regular files (`CF_HDROP`), for example from NanaZip or
+    7-Zip, or a plain Explorer copy. Today the window says these come with
+    M2. Folder sizes are computed in the background.
+3.  Q8 leftover: a job object, so `rdppaste` dies with the window.
 
 ## Open questions
 
@@ -54,7 +56,7 @@ These are from `docs/designs/files_project_m0.md`:
 *   **Q1:** the freeze baseline in Explorer.
 *   **Q2:** which RDP client and which server policy.
 *   **Q4:** whether loopback RDP works.
-*   **Q5:** the full conflict UI. M0 has only fail and `--overwrite`.
+*   **Q5:** answered in M1. The choices are replace, skip existing, or keep both (`name (2).ext`), through rdppaste exit code 5 and a bar in the window.
 *   **Q6:** what happens when the session drops or the clipboard changes.
 *   **Q7:** code signing.
 *   **Q8:** answered in M1. The protocol is `files_core::machine` (tab-separated lines on stdout; closing stdin cancels). One paste runs at a time.
