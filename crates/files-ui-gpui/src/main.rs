@@ -42,7 +42,37 @@ fn command(arg: &std::ffi::OsStr) -> bool {
     true
 }
 
+/// The window has no console, so a crash goes to
+/// `%LOCALAPPDATA%\FilesProject\logs\files.log` with a backtrace.
+fn log_panics() {
+    let Some(dir) =
+        std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join(r"FilesProject\logs"))
+    else {
+        return;
+    };
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        use std::io::Write;
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("files.log"))
+        {
+            let trace = std::backtrace::Backtrace::force_capture();
+            let _ = writeln!(
+                f,
+                "{:?} v{}: {info}\n{trace}",
+                std::time::SystemTime::now(),
+                env!("CARGO_PKG_VERSION")
+            );
+        }
+        default(info);
+    }));
+}
+
 fn main() {
+    log_panics();
     let mut args: Vec<_> = std::env::args_os().skip(1).collect();
     if args.first().is_some_and(|a| command(a)) {
         return;

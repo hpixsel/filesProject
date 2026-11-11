@@ -615,8 +615,13 @@ impl Workspace {
         let mut bar = TabBar::new(("tabs", pane_ix))
             .selected_index(pane.active)
             .on_click(cx.listener(move |this, ix: &usize, window, cx| {
+                // A click on a tab's close button reaches the tab too, after
+                // the close: that tab, or its whole pane, may be gone.
+                let Some(pane) = this.panes.get_mut(pane_ix) else {
+                    return;
+                };
+                pane.active = (*ix).min(pane.tabs.len() - 1);
                 this.active_pane = pane_ix;
-                this.panes[pane_ix].active = *ix;
                 this.focus_active(window, cx);
             }));
         for (tab_ix, tab) in pane.tabs.iter().enumerate() {
