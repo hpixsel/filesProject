@@ -247,6 +247,8 @@ impl Workspace {
                 eprintln!("cannot save settings: {e}");
             }
         }
+        // Back to the file list, so its shortcuts (Ctrl+Alt+T, ...) work again.
+        self.focus_active(window, cx);
         window.refresh();
     }
 

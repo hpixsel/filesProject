@@ -93,9 +93,21 @@ session reads.
         tested yet (the owner was away from the home network).
     *   **Known limit:** the drive list is read at start and after those
         dialogs, not when a drive appears elsewhere (USB stick, Explorer).
-5.  **Next:** M6 (CLI, updater, Explorer replacement with
-    `--restore-explorer`). Later, a settings page with adjustable density
-    steps.
+5.  **M6 CLI (branch `m6-cli`), tested by hand by the owner:**
+    *   **Open terminal here:** toolbar button or Ctrl+Alt+T (Ctrl+` does
+        not arrive on a Polish layout). Starts Windows Terminal by its full
+        alias path (`%LOCALAPPDATA%\Microsoft\WindowsApps\wt.exe`; a search
+        by name misses Store aliases), else `pwsh`, else `powershell`.
+    *   **One window:** `files <folder>` (also `files .`) hands the folder
+        to the running window through a named pipe
+        (`files_win::instance`, local clients only) and exits. The folder
+        opens as a new tab.
+    *   **Focus lesson:** the Explorer shortcuts work only while focus is in
+        a pane, so title-bar changes refocus the active pane.
+6.  **Next in M6:** updates from GitHub releases (decided: SHA-256 plus a
+    minisign signature, old version kept for rollback; also put `files` on
+    PATH), then replacing Explorer with `--restore-explorer`. Later, a
+    settings page with adjustable density steps.
 
 ## Open questions
 
