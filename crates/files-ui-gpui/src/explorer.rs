@@ -45,7 +45,8 @@ actions!(
         NewFolder,
         ClearSelection,
         Properties,
-        ToggleHidden
+        ToggleHidden,
+        ToggleGrid
     ]
 );
 
@@ -154,6 +155,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("escape", ClearSelection, Some(CONTEXT)),
         KeyBinding::new("alt-enter", Properties, Some(CONTEXT)),
         KeyBinding::new("ctrl-h", ToggleHidden, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-g", ToggleGrid, Some(CONTEXT)),
     ]);
 }
 
@@ -675,6 +677,10 @@ pub struct Explorer {
     pending_rename: Option<PathBuf>,
     /// The address shows as clickable crumbs; this is true while it is typed in.
     editing_address: bool,
+    /// The thumbnail view (large pictures) instead of the list.
+    grid: bool,
+    /// Thumbnails for the grid, filled in the background per folder.
+    thumbs: Arc<Mutex<HashMap<PathBuf, Arc<RenderImage>>>>,
     /// The hover preview on screen, and a counter that drops stale ones.
     preview: Option<Preview>,
     hover_gen: usize,
@@ -777,6 +783,8 @@ impl Explorer {
             drives: Vec::new(),
             pending_rename: None,
             editing_address: false,
+            grid: false,
+            thumbs: Default::default(),
             preview: None,
             hover_gen: 0,
             typed: (String::new(), std::time::Instant::now()),
@@ -844,6 +852,14 @@ impl Explorer {
                         let icons: Arc<Mutex<HashMap<PathBuf, Arc<RenderImage>>>> =
                             Default::default();
                         this.load_icons(wants, icons.clone(), window, cx);
+                        if this.grid {
+                            let files: Vec<PathBuf> = items
+                                .iter()
+                                .filter(|i| !i.is_dir)
+                                .map(|i| i.path.clone())
+                                .collect();
+                            this.load_thumbs(files, window, cx);
+                        }
                         this.table.update(cx, |t, cx| {
                             t.delegate_mut().items = items;
                             t.delegate_mut().place = place;
@@ -1151,6 +1167,199 @@ impl Explorer {
 
     /// Windows' icons for `paths`, a few at a time off the UI thread, each
     /// batch shown as it arrives. A newer folder has its own `icons`.
+    /// The list or the thumbnail grid (for photos).
+    fn toggle_grid(&mut self, _: &ToggleGrid, window: &mut Window, cx: &mut Context<Self>) {
+        self.grid = !self.grid;
+        if self.grid {
+            let files: Vec<PathBuf> = self
+                .table
+                .read(cx)
+                .delegate()
+                .items
+                .iter()
+                .filter(|i| !i.is_dir)
+                .map(|i| i.path.clone())
+                .collect();
+            self.load_thumbs(files, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Thumbnails (photos, videos, PDFs) for the grid, a few at a time off
+    /// the UI thread, shown as they arrive. A newer folder starts a new map.
+    fn load_thumbs(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let thumbs: Arc<Mutex<HashMap<PathBuf, Arc<RenderImage>>>> = Default::default();
+        self.thumbs = thumbs.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            for chunk in paths.chunks(8) {
+                let chunk = chunk.to_vec();
+                let found = cx
+                    .background_spawn(async move {
+                        chunk
+                            .into_iter()
+                            .filter_map(|p| {
+                                let pic = shell_picture(&p, 256, true).or_else(|| {
+                                    has_own_icon(&p)
+                                        .then(|| shell_picture(&p, 96, false))
+                                        .flatten()
+                                });
+                                pic.map(|i| (p, i))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .await;
+                thumbs.lock().unwrap().extend(found);
+                // Stop once another folder (or the list view) took over.
+                let alive = this.update(cx, |this, cx| {
+                    cx.notify();
+                    this.grid && Arc::ptr_eq(&this.thumbs, &thumbs)
+                });
+                if !matches!(alive, Ok(true)) {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The folder as large tiles: thumbnails for photos and videos, icons
+    /// for the rest. Click selects (Ctrl+click adds), double-click opens,
+    /// right-click is Explorer's menu, middle-click opens a folder in a tab.
+    fn grid_view(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        // shortcut: every tile is laid out (no virtual scrolling); fine for
+        // photo folders, slow past a few thousand items. Virtualize then.
+        let t = cx.theme();
+        let (muted, hover, selected, accent, radius) = (
+            t.muted_foreground,
+            t.table_hover,
+            t.table_active,
+            t.primary,
+            t.radius,
+        );
+        let table = self.table.read(cx);
+        let l = table.delegate();
+        let marked: BTreeSet<usize> = if l.marked.is_empty() {
+            table.selected_row().into_iter().collect()
+        } else {
+            l.marked.clone()
+        };
+        let thumbs = self.thumbs.lock().unwrap();
+        let icons = l.icons.lock().unwrap();
+        let mut grid = div()
+            .id("grid")
+            .size_full()
+            .overflow_y_scroll()
+            .p_2()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .content_start()
+            .gap_2();
+        for (ix, item) in l.items.iter().enumerate() {
+            let picture = thumbs
+                .get(&item.path)
+                .or_else(|| icons.get(&item.path))
+                .cloned();
+            let (icon, color) = item_icon(item, accent, muted);
+            let face = match picture {
+                Some(p) => img(ImageSource::Render(p))
+                    .max_w(px(128.))
+                    .max_h(px(128.))
+                    .object_fit(ObjectFit::Contain)
+                    .into_any_element(),
+                None => icon.size_16().text_color(color).into_any_element(),
+            };
+            let (open_dir, menu_paths) = (
+                item.is_dir
+                    .then(|| item.link.clone().unwrap_or_else(|| item.path.clone())),
+                item.path.clone(),
+            );
+            grid = grid.child(
+                div()
+                    .id(("tile", ix))
+                    .w(px(144.))
+                    .p_2()
+                    .v_flex()
+                    .items_center()
+                    .gap_1()
+                    .rounded(radius)
+                    .cursor_pointer()
+                    .when(marked.contains(&ix), |d| d.bg(selected))
+                    .hover(move |s| s.bg(hover))
+                    .child(
+                        div()
+                            .size(px(128.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(face),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .text_center()
+                            .text_sm()
+                            .truncate()
+                            .child(item.name.clone()),
+                    )
+                    .on_click(cx.listener(move |this, e: &ClickEvent, window, cx| {
+                        if e.click_count() >= 2 {
+                            return this.open_row(ix, window, cx);
+                        }
+                        let ctrl = e.modifiers().control;
+                        this.table.update(cx, |t, cx| {
+                            let l = t.delegate_mut();
+                            if ctrl {
+                                if !l.marked.remove(&ix) {
+                                    l.marked.insert(ix);
+                                }
+                            } else {
+                                l.marked = [ix].into();
+                            }
+                            l.anchor = Some(ix);
+                            t.set_selected_row(ix, cx);
+                        });
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, _, window, cx| {
+                            let paths = {
+                                let l = this.table.read(cx).delegate();
+                                if l.marked.contains(&ix) {
+                                    l.marked_paths()
+                                } else {
+                                    vec![menu_paths.clone()]
+                                }
+                            };
+                            this.table.update(cx, |t, _| {
+                                let l = t.delegate_mut();
+                                if !l.marked.contains(&ix) {
+                                    l.marked = [ix].into();
+                                }
+                                l.row_menu.store(true, Ordering::SeqCst);
+                            });
+                            let Some(h) = hwnd(window) else { return };
+                            let changed = this.changed.clone();
+                            outside_dispatch(cx, move || {
+                                if let Ok(Picked::Ran) = files_win::shell::context_menu(h, &paths) {
+                                    changed.store(true, Ordering::SeqCst);
+                                }
+                            });
+                        }),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(move |_, _, _, cx| {
+                            if let Some(dir) = open_dir.clone() {
+                                cx.emit(OpenInNewTab(dir));
+                            }
+                        }),
+                    ),
+            );
+        }
+        grid
+    }
+
     fn load_icons(
         &mut self,
         paths: Vec<PathBuf>,
@@ -1844,6 +2053,15 @@ impl Render for Explorer {
                     .on_click(cx.listener(|this, _, w, cx| this.copy_path(&CopyPath, w, cx))),
             )
             .child(
+                Button::new("grid")
+                    .cursor_pointer()
+                    .ghost()
+                    .selected(self.grid)
+                    .icon(IconName::LayoutDashboard)
+                    .tooltip(tr!("Thumbnails (Ctrl+Shift+G)", "Miniatury (Ctrl+Shift+G)"))
+                    .on_click(cx.listener(|this, _, w, cx| this.toggle_grid(&ToggleGrid, w, cx))),
+            )
+            .child(
                 Button::new("terminal")
                     .cursor_pointer()
                     .ghost()
@@ -1988,6 +2206,7 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::new_folder))
             .on_action(cx.listener(Self::clear_selection))
             .on_action(cx.listener(Self::properties))
+            .on_action(cx.listener(Self::toggle_grid))
             .on_action(cx.listener(|_, _: &ToggleHidden, _, cx| {
                 crate::prefs::set(cx, |s| s.show_hidden = !s.show_hidden)
             }))
@@ -2037,6 +2256,8 @@ impl Render for Explorer {
                     }))
                     .child(if Place::of(self.history.current()) == Place::ThisPc {
                         self.this_pc_view(cx).into_any_element()
+                    } else if self.grid {
+                        self.grid_view(cx).into_any_element()
                     } else {
                         DataTable::new(&self.table)
                             .with_size(theme::table_size())
