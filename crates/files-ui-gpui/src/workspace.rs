@@ -1197,6 +1197,29 @@ impl Render for Workspace {
             .v_flex()
             .size_full()
             .key_context(CONTEXT)
+            // Files dragged to the window's edge leave it: Windows' own drag
+            // takes over, to Explorer, the desktop or any program.
+            .on_drag_move(|e: &DragMoveEvent<DraggedFiles>, window, cx| {
+                let (pos, size) = (e.event.position, window.viewport_size());
+                let edge = px(4.);
+                let leaving = pos.x < edge
+                    || pos.y < edge
+                    || pos.x > size.width - edge
+                    || pos.y > size.height - edge;
+                if !leaving {
+                    return;
+                }
+                let d = e.drag(cx);
+                let (paths, source) = (d.paths().to_vec(), d.source());
+                cx.stop_active_drag(window);
+                // A modal loop: outside GPUI's event dispatch.
+                cx.spawn(async move |_: &mut AsyncApp| {
+                    if let Ok(true) = files_win::drag::drag_out(&paths) {
+                        source.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                })
+                .detach();
+            })
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_tab))

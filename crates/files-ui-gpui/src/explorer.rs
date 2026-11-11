@@ -74,6 +74,11 @@ pub struct DraggedFiles {
 }
 
 impl DraggedFiles {
+    /// The list they came from; reloads after a move took them away.
+    pub fn source(&self) -> Arc<AtomicBool> {
+        self.changed.clone()
+    }
+
     pub fn paths(&self) -> &[PathBuf] {
         &self.paths
     }

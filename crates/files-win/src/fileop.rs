@@ -34,7 +34,7 @@ pub fn clipboard_has_paths() -> bool {
 }
 
 /// The items as one shell item array (they share a folder).
-fn item_array(paths: &[PathBuf]) -> Result<IShellItemArray> {
+pub(crate) fn item_array(paths: &[PathBuf]) -> Result<IShellItemArray> {
     let pidls = crate::shell::Pidls::parse(paths)?;
     // SAFETY: the PIDLs stay alive until `pidls` drops, after the call.
     Ok(unsafe { SHCreateShellItemArrayFromIDLists(&pidls.as_slice())? })
