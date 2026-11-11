@@ -113,7 +113,7 @@ impl TableDelegate for Listing {
         cx: &mut Context<TableState<Self>>,
     ) -> Stateful<Div> {
         let marked = self.marked.contains(&row_ix) && self.marked.len() > 1;
-        let row = div().id(("row", row_ix));
+        let row = div().id(("row", row_ix)).cursor_pointer();
         let row = if marked {
             row.bg(cx.theme().table_active)
         } else {
@@ -652,6 +652,7 @@ impl Render for Explorer {
             .pb_2()
             .child(
                 Button::new("back")
+                    .cursor_pointer()
                     .ghost()
                     .icon(IconName::ArrowLeft)
                     .disabled(!can_back)
@@ -660,6 +661,7 @@ impl Render for Explorer {
             )
             .child(
                 Button::new("forward")
+                    .cursor_pointer()
                     .ghost()
                     .icon(IconName::ArrowRight)
                     .disabled(!can_forward)
@@ -668,6 +670,7 @@ impl Render for Explorer {
             )
             .child(
                 Button::new("up")
+                    .cursor_pointer()
                     .ghost()
                     .icon(IconName::ArrowUp)
                     .tooltip("Up (Alt+Up)")
@@ -675,6 +678,7 @@ impl Render for Explorer {
             )
             .child(
                 Button::new("refresh")
+                    .cursor_pointer()
                     .ghost()
                     .icon(IconName::RefreshCw)
                     .tooltip("Refresh (F5)")
@@ -683,6 +687,7 @@ impl Render for Explorer {
             .child(div().flex_1().child(Input::new(&self.address)))
             .child(
                 Button::new("paste")
+                    .cursor_pointer()
                     .primary()
                     .label("Paste from RDP")
                     .tooltip("Ctrl+V")
@@ -732,6 +737,7 @@ impl Render for Explorer {
                 )
                 .child(
                     Button::new("cancel")
+                        .cursor_pointer()
                         .ghost()
                         .label("Cancel")
                         .on_click(cx.listener(|this, _, _, _| this.cancel_paste())),
@@ -740,6 +746,7 @@ impl Render for Explorer {
         if let Some(message) = self.conflict.clone() {
             let choice = |id: &'static str, label: &'static str, flag: &'static str| {
                 Button::new(id)
+                    .cursor_pointer()
                     .label(label)
                     .on_click(cx.listener(move |this, _, _, cx| this.start(Some(flag), cx)))
             };
@@ -754,6 +761,7 @@ impl Render for Explorer {
                 .child(choice("both", "Keep both", "--rename").outline())
                 .child(
                     Button::new("dismiss")
+                        .cursor_pointer()
                         .ghost()
                         .label("Cancel")
                         .on_click(cx.listener(|this, _, _, cx| {

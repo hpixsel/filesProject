@@ -216,18 +216,30 @@ impl Workspace {
                 .text_color(muted)
                 .child(text)
         };
+        let (hover, icon_color, radius) = (
+            cx.theme().table_hover,
+            cx.theme().primary,
+            cx.theme().radius,
+        );
         let entry = |id: SharedString,
                      label: String,
                      icon: IconName,
                      path: PathBuf,
                      cx: &mut Context<Self>| {
-            Button::new(id)
-                .ghost()
+            div()
+                .id(id)
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
                 .w_full()
-                .justify_start()
-                .icon(icon)
-                .label(label)
-                .tooltip(path.display().to_string())
+                .px_2()
+                .py_1()
+                .rounded(radius)
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .child(Icon::new(icon).text_color(icon_color))
+                .child(div().truncate().child(label))
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.go_to(path.clone(), window, cx)),
                 )
@@ -284,13 +296,19 @@ impl Workspace {
             }));
         for (tab_ix, tab) in pane.tabs.iter().enumerate() {
             let close = Button::new(("close", pane_ix * 1000 + tab_ix))
+                .cursor_pointer()
                 .ghost()
                 .xsmall()
                 .icon(IconName::Close)
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.close(pane_ix, tab_ix, window, cx)),
                 );
-            bar = bar.child(Tab::new().label(tab.read(cx).title()).suffix(close));
+            bar = bar.child(
+                Tab::new()
+                    .cursor_pointer()
+                    .label(tab.read(cx).title())
+                    .suffix(close),
+            );
         }
         let border = if focused {
             cx.theme().primary
@@ -318,7 +336,7 @@ impl Workspace {
                 }),
             )
             .child(div().px_3().child(bar))
-            .child(div().flex_1().child(pane.current().clone()))
+            .child(div().flex_1().min_h_0().child(pane.current().clone()))
     }
 }
 
@@ -346,6 +364,7 @@ impl Render for Workspace {
                         .pr_2()
                         .child(
                             Button::new("fav")
+                                .cursor_pointer()
                                 .ghost()
                                 .icon(if is_favourite {
                                     IconName::StarFill
@@ -359,6 +378,7 @@ impl Render for Workspace {
                         )
                         .child(
                             Button::new("split")
+                                .cursor_pointer()
                                 .ghost()
                                 .icon(IconName::PanelRight)
                                 .tooltip("Split panes (F6)")
@@ -368,6 +388,7 @@ impl Render for Workspace {
                         )
                         .child(
                             Button::new("mode")
+                                .cursor_pointer()
                                 .ghost()
                                 .icon(if dark { IconName::Sun } else { IconName::Moon })
                                 .tooltip("Light / dark")
@@ -384,6 +405,7 @@ impl Render for Workspace {
                         )
                         .child(
                             Button::new("accent")
+                                .cursor_pointer()
                                 .ghost()
                                 .icon(IconName::Palette)
                                 .tooltip("Accent colour")
@@ -395,7 +417,9 @@ impl Render for Workspace {
                         ),
                 );
 
-        let mut panes = div().h_flex().flex_1().min_h_0().gap_2();
+        // flex_row, not h_flex: h_flex centres children vertically instead of
+        // stretching them, which collapsed the panes.
+        let mut panes = div().flex().flex_row().flex_1().min_h_0().gap_2();
         for i in 0..self.panes.len() {
             panes = panes.child(self.pane_view(i, cx));
         }
@@ -416,7 +440,8 @@ impl Render for Workspace {
             .child(title)
             .child(
                 div()
-                    .h_flex()
+                    .flex()
+                    .flex_row()
                     .flex_1()
                     .min_h_0()
                     .child(self.sidebar(cx))
