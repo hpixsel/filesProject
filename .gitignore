@@ -2,3 +2,6 @@ target/
 *.partial
 .vscode/
 .idea/
+
+# Signing keys never go in the repo (minisign.pub is public and stays).
+*.key
