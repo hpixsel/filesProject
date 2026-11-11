@@ -73,6 +73,59 @@ pub fn hwnd(window: &Window) -> Option<isize> {
 /// Runs a shell call that may start a modal message loop (menus, dialogs)
 /// from a task, outside GPUI's event dispatch: inside it, the nested loop
 /// re-enters GPUI while its state is borrowed and the app panics.
+/// Icon file (in `assets/icons`) and hue for a file or folder, from its
+/// name. A `None` hue keeps the default colour (accent folder, muted file);
+/// `None` overall is the plain folder or file icon.
+fn icon_kind(name: &str, is_dir: bool) -> Option<(&'static str, Option<f32>)> {
+    if is_dir {
+        return match name.to_ascii_lowercase().as_str() {
+            "downloads" | "pobrane" => Some(("folder-down", None)),
+            ".git" => Some(("folder-git-2", Some(15.))),
+            n if n.starts_with('.') => Some(("folder-dot", None)),
+            _ => None,
+        };
+    }
+    let ext = name.rsplit_once('.')?.1.to_ascii_lowercase();
+    let (icon, hue) = match ext.as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg" | "ico" | "heic" | "tif"
+        | "tiff" | "psd" | "afphoto" | "afdesign" => ("file-image", 150.),
+        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "webm" => ("file-play", 280.),
+        "mp3" | "wav" | "flac" | "ogg" | "m4a" | "aac" | "wma" => ("file-music", 330.),
+        "zip" | "7z" | "rar" | "tar" | "gz" | "xz" | "bz2" | "zst" | "cab" | "iso" | "msi" => {
+            ("file-archive", 35.)
+        }
+        "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "c" | "h" | "cpp" | "hpp" | "cs" | "java"
+        | "go" | "kt" | "swift" | "html" | "css" | "scss" | "json" | "xml" | "yaml" | "yml"
+        | "toml" | "sql" | "lua" | "php" | "rb" => ("file-code", 195.),
+        "exe" | "bat" | "cmd" | "ps1" | "sh" | "com" | "msix" | "appx" => ("file-terminal", 50.),
+        "xlsx" | "xls" | "xlsm" | "csv" | "ods" => ("file-spreadsheet", 140.),
+        "pdf" => ("file-text", 0.),
+        "txt" | "md" | "log" | "doc" | "docx" | "rtf" | "odt" | "ppt" | "pptx" => {
+            ("file-text", 217.)
+        }
+        "ttf" | "otf" | "woff" | "woff2" => ("file-type", 260.),
+        "pem" | "crt" | "cer" | "key" | "pfx" | "p12" | "pub" | "kdbx" => ("file-key", 45.),
+        "ini" | "cfg" | "conf" | "config" | "reg" | "env" | "lock" => {
+            return Some(("file-cog", None))
+        }
+        _ => return None,
+    };
+    Some((icon, Some(hue)))
+}
+
+/// The table's icon for `item` and its colour.
+fn item_icon(item: &Item, accent: Hsla, muted: Hsla) -> (Icon, Hsla) {
+    let plain = if item.is_dir { accent } else { muted };
+    match icon_kind(&item.name, item.is_dir) {
+        Some((name, hue)) => (
+            Icon::empty().path(format!("icons/{name}.svg")),
+            hue.map_or(plain, |h| hsla(h / 360., 0.7, 0.6, 1.)),
+        ),
+        None if item.is_dir => (Icon::new(IconName::Folder), plain),
+        None => (Icon::new(IconName::File), plain),
+    }
+}
+
 fn outside_dispatch(cx: &mut App, f: impl FnOnce() + 'static) {
     cx.spawn(async move |_: &mut AsyncApp| f()).detach();
 }
@@ -183,15 +236,11 @@ impl TableDelegate for Listing {
         let muted = cx.theme().muted_foreground;
         match col_ix {
             0 => {
-                let (icon, color) = if item.is_dir {
-                    (IconName::Folder, cx.theme().primary)
-                } else {
-                    (IconName::File, muted)
-                };
+                let (icon, color) = item_icon(item, cx.theme().primary, muted);
                 div()
                     .h_flex()
                     .gap_2()
-                    .child(Icon::new(icon).text_color(color))
+                    .child(icon.text_color(color))
                     .child(item.name.clone())
             }
             1 => {
@@ -706,7 +755,7 @@ impl Render for Explorer {
             .h_flex()
             .gap_1()
             .px_3()
-            .pb_2()
+            .py_2() // the same gap under the tabs as above the file list
             .child(
                 Button::new("back")
                     .cursor_pointer()
@@ -877,6 +926,15 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::copy_path))
             .on_action(cx.listener(Self::open_terminal))
+            // The mouse's side buttons.
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|this, _, w, cx| this.go_back(&GoBack, w, cx)),
+            )
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(|this, _, w, cx| this.go_forward(&GoForward, w, cx)),
+            )
             .text_color(cx.theme().foreground)
             .child(toolbar)
             .child(
@@ -890,5 +948,25 @@ impl Render for Explorer {
                     .child(DataTable::new(&self.table).with_size(theme::table_size())),
             )
             .child(div().pt_2().child(status))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::icon_kind;
+
+    #[test]
+    fn icons_by_name() {
+        assert_eq!(
+            icon_kind("Photo.JPG", false),
+            Some(("file-image", Some(150.)))
+        );
+        assert_eq!(icon_kind("a.tar.gz", false).unwrap().0, "file-archive");
+        assert_eq!(icon_kind("setup.ini", false), Some(("file-cog", None)));
+        assert_eq!(icon_kind("README", false), None, "no extension");
+        assert_eq!(icon_kind("odd.", false), None);
+        assert_eq!(icon_kind("Downloads", true).unwrap().0, "folder-down");
+        assert_eq!(icon_kind(".cargo", true).unwrap().0, "folder-dot");
+        assert_eq!(icon_kind("photos.jpg", true), None, "folders by name only");
     }
 }

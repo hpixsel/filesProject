@@ -1589,6 +1589,7 @@ dependencies = [
 name = "files-ui-gpui"
 version = "0.2.0"
 dependencies = [
+ "embed-resource",
  "files-app",
  "files-core",
  "files-jobs",

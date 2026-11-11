@@ -3,6 +3,7 @@
 // No console window, in debug builds too (they are what gets tested).
 #![windows_subsystem = "windows"]
 
+mod assets;
 mod explorer;
 mod i18n;
 mod theme;
@@ -77,7 +78,7 @@ fn main() {
 
     // Icons (toolbar, file list, window caption buttons) live in these assets.
     gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
+        .with_assets(assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
             explorer::bind_keys(cx);
