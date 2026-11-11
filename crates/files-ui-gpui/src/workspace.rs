@@ -106,6 +106,7 @@ impl Workspace {
             focus: cx.focus_handle(),
         };
         if let Some(h) = explorer::hwnd(window) {
+            files_win::shell::set_acrylic(h);
             let sink = this.drop_sink.clone();
             let on_drop = move |r: files_win::Result<()>| {
                 if let Some(f) = sink.lock().unwrap().as_ref() {
@@ -416,6 +417,9 @@ impl Render for Workspace {
                         .h_flex()
                         .gap_1()
                         .pr_2()
+                        // The title bar starts a window move on mouse down + move, and that
+                        // swallows the mouse up, so button clicks never finished.
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(
                             Button::new("fav")
                                 .cursor_pointer()

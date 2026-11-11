@@ -838,10 +838,7 @@ impl Render for Explorer {
                     .border_1()
                     .border_color(cx.theme().border)
                     .overflow_hidden()
-                    .child(
-                        DataTable::new(&self.table)
-                            .with_size(gpui_kit::component::Size::Size(theme::row_height())),
-                    ),
+                    .child(DataTable::new(&self.table).with_size(theme::table_size())),
             )
             .child(div().pt_2().child(status))
     }

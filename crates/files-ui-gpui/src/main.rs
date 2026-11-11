@@ -1,6 +1,7 @@
 //! FilesProject window: tabs and panes of folders, Explorer context menu and
 //! Ctrl+V paste from an RDP session through a child `rdppaste --machine`.
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// No console window, in debug builds too (they are what gets tested).
+#![windows_subsystem = "windows"]
 
 mod explorer;
 mod i18n;
@@ -36,7 +37,9 @@ fn main() {
             theme::apply(&settings, None, cx);
             let options = WindowOptions {
                 titlebar: Some(TitleBar::title_bar_options()),
-                window_background: WindowBackgroundAppearance::Blurred,
+                // Mica gets DWM ready for a system backdrop; Workspace::new swaps it
+                // for acrylic (files_win::shell::set_acrylic).
+                window_background: WindowBackgroundAppearance::MicaBackdrop,
                 ..Default::default()
             };
             gpui_kit::open_window(options, cx, move |window, cx| {

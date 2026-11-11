@@ -1,6 +1,7 @@
 //! One accent hue drives every panel colour (CLAUDE.md: "kolor przewodni").
 
 use files_app::settings::Settings;
+use gpui_kit::component::Size;
 use gpui_kit::component::*;
 use gpui_kit::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -9,14 +10,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub const PRESETS: [f32; 5] = [217., 262., 152., 25., 330.];
 
 /// Normal, compact, very compact: (base font size, which also scales every
-/// rem-based padding, and file row height).
-const DENSITY: [(f32, f32); 3] = [(16., 32.), (14., 26.), (13., 22.)];
+/// rem-based padding, and the file table's size). The table's own sizes keep
+/// text and cell padding matched to the row; `Size::Size` drops both.
+const DENSITY: [(f32, Size); 3] = [(16., Size::Medium), (14., Size::Small), (13., Size::XSmall)];
 
 static ROWS: AtomicUsize = AtomicUsize::new(0);
 
-/// File row height for the density last applied.
-pub fn row_height() -> Pixels {
-    px(DENSITY[ROWS.load(Ordering::Relaxed)].1)
+/// File table size for the density last applied.
+pub fn table_size() -> Size {
+    DENSITY[ROWS.load(Ordering::Relaxed)].1
 }
 
 /// The accent the settings ask for. "Wallpaper" is the Windows accent colour,
@@ -84,6 +86,7 @@ pub fn apply(s: &Settings, window: Option<&mut Window>, cx: &mut App) {
     t.title_bar_border = c(0., 0., 0.);
     t.table = c(0., 0., 0.);
     t.table_head = c(0.14, 0.5, 0.06);
+    t.table_head_foreground = t.muted_foreground;
     t.table_even = c(0.14, 0.5, 0.03);
     t.table_hover = c(0.7, 0.6, l(0.10, 0.08));
     t.table_active = c(0.8, 0.6, l(0.24, 0.18));

@@ -252,3 +252,21 @@ pub fn ui_is_polish() -> bool {
     // SAFETY: no arguments. The low 10 bits are the primary language.
     unsafe { windows::Win32::Globalization::GetUserDefaultUILanguage() & 0x3ff == 0x15 }
 }
+
+/// Windows 11's own acrylic backdrop (DWMSBT_TRANSIENTWINDOW). It moves with
+/// the window smoothly, unlike the older `SetWindowCompositionAttribute`
+/// acrylic behind GPUI's `Blurred`, which lags while dragging. Older Windows
+/// ignores it and keeps what was set before.
+pub fn set_acrylic(window: isize) {
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE};
+    let acrylic = 3u32;
+    // SAFETY: a valid window and a u32 attribute of the right size.
+    let _ = unsafe {
+        DwmSetWindowAttribute(
+            hwnd(window),
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            &acrylic as *const u32 as *const _,
+            4,
+        )
+    };
+}
