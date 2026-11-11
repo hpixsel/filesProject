@@ -239,47 +239,37 @@ impl Workspace {
         cx.notify();
     }
 
-    /// A new tab's view; its middle-clicked folders open as background tabs
-    /// next to it.
+    /// A new tab's view; its middle-clicked folders open as new tabs next
+    /// to it.
     fn explorer(dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Entity<Explorer> {
         let tab = cx.new(|cx| Explorer::new(dir, window, cx));
         cx.subscribe_in(&tab, window, |this, tab, e: &OpenInNewTab, window, cx| {
             let pane = this.panes.iter().position(|p| p.tabs.contains(tab));
-            this.add_tab(
-                e.0.clone(),
-                pane.unwrap_or(this.active_pane),
-                false,
-                window,
-                cx,
-            );
+            this.add_tab(e.0.clone(), pane.unwrap_or(this.active_pane), window, cx);
         })
         .detach();
         tab
     }
 
-    /// Opens `dir` in a new tab right after the current one of `pane_ix`;
-    /// `focus` switches to it, otherwise it opens in the background.
+    /// Opens `dir` in a new tab right after the current one of `pane_ix`
+    /// and switches to it.
     fn add_tab(
         &mut self,
         dir: PathBuf,
         pane_ix: usize,
-        focus: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let tab = Self::explorer(dir, window, cx);
         let pane = &mut self.panes[pane_ix];
         pane.tabs.insert(pane.active + 1, tab);
-        if focus {
-            pane.active += 1;
-            self.active_pane = pane_ix;
-            self.focus_active(window, cx);
-        }
-        cx.notify();
+        pane.active += 1;
+        self.active_pane = pane_ix;
+        self.focus_active(window, cx);
     }
 
     fn open_tab(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_tab(dir, self.active_pane, true, window, cx);
+        self.add_tab(dir, self.active_pane, window, cx);
     }
 
     fn new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -460,7 +450,7 @@ impl Workspace {
         );
         let entry =
             |id: SharedString, label: String, icon: Icon, path: PathBuf, cx: &mut Context<Self>| {
-                let background = path.clone();
+                let middle = path.clone();
                 div()
                     .id(id)
                     .flex()
@@ -484,7 +474,7 @@ impl Workspace {
                         MouseButton::Middle,
                         cx.listener(move |this, _, window, cx| {
                             let pane = this.active_pane;
-                            this.add_tab(background.clone(), pane, false, window, cx)
+                            this.add_tab(middle.clone(), pane, window, cx)
                         }),
                     )
             };

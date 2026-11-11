@@ -45,7 +45,7 @@ actions!(
 const CONTEXT: &str = "Explorer";
 
 /// A folder middle-clicked in the list: the workspace opens it as a
-/// background tab.
+/// new tab.
 pub struct OpenInNewTab(pub PathBuf);
 
 impl EventEmitter<OpenInNewTab> for Explorer {}
