@@ -150,6 +150,25 @@ impl History {
     pub fn can_forward(&self) -> bool {
         !self.forward.is_empty()
     }
+
+    /// Where Back leads, nearest first.
+    pub fn back_list(&self) -> impl Iterator<Item = &Path> {
+        self.back.iter().rev().map(PathBuf::as_path)
+    }
+
+    /// Where Forward leads, nearest first.
+    pub fn forward_list(&self) -> impl Iterator<Item = &Path> {
+        self.forward.iter().rev().map(PathBuf::as_path)
+    }
+
+    /// Back (`n` > 0) or forward (`n` < 0) that many steps at once.
+    pub fn step(&mut self, n: isize) {
+        for _ in 0..n.unsigned_abs() {
+            if !(if n > 0 { self.back() } else { self.forward() }) {
+                break;
+            }
+        }
+    }
 }
 
 /// Human-readable size: B, KB, MB, GB (1024-based).
@@ -219,6 +238,20 @@ mod tests {
         h.go(PathBuf::from(r"C:\a\b")); // same place: no history entry
         assert!(h.back());
         assert_eq!(h.current(), Path::new(r"C:\a\b\c"));
+
+        let mut j = History::new(PathBuf::from("a"));
+        for d in ["b", "c", "d"] {
+            j.go(PathBuf::from(d));
+        }
+        assert_eq!(
+            j.back_list().collect::<Vec<_>>(),
+            [Path::new("c"), Path::new("b"), Path::new("a")]
+        );
+        j.step(2);
+        assert_eq!(j.current(), Path::new("b"));
+        assert_eq!(j.forward_list().next(), Some(Path::new("c")));
+        j.step(-2);
+        assert_eq!(j.current(), Path::new("d"));
 
         let mut h = History::new(PathBuf::from(r"C:\"));
         assert!(h.up(), "a drive root goes up to This PC");

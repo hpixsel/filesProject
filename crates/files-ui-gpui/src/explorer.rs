@@ -8,6 +8,7 @@ use files_jobs::sizes::{scan_sizes, SizeScan};
 use files_win::shell::Picked;
 use gpui_kit::component::button::*;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::menu::{ContextMenu, ContextMenuExt, PopupMenuItem};
 use gpui_kit::component::table::*;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -235,6 +236,18 @@ struct Preview {
     path: PathBuf,
     image: Arc<RenderImage>,
     at: Point<Pixels>,
+}
+
+/// A short name for a folder in menus: its own name, a drive, or a place.
+fn place_name(p: &Path) -> String {
+    match Place::of(p) {
+        Place::ThisPc => tr!("This PC", "Ten komputer"),
+        Place::RecycleBin => tr!("Recycle Bin", "Kosz"),
+        Place::Folder => p
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| p.display().to_string()),
+    }
 }
 
 /// A drive tile in This PC.
@@ -1779,6 +1792,45 @@ impl Explorer {
         self.focus.focus(window, cx);
     }
 
+    /// Right-click on Back or Forward: the folders that way, nearest first;
+    /// choosing one jumps there.
+    fn history_menu(&self, back: bool, cx: &mut Context<Self>) -> ContextMenu<Stateful<Div>> {
+        let steps: Vec<(String, isize)> = {
+            let list: Vec<&Path> = if back {
+                self.history.back_list().collect()
+            } else {
+                self.history.forward_list().collect()
+            };
+            list.into_iter()
+                .take(20)
+                .enumerate()
+                .map(|(i, p)| {
+                    let n = i as isize + 1;
+                    (place_name(p), if back { n } else { -n })
+                })
+                .collect()
+        };
+        let me = cx.weak_entity();
+        div()
+            .id(if back {
+                "back-history"
+            } else {
+                "forward-history"
+            })
+            .context_menu(move |mut menu, _, _| {
+                for (label, n) in steps.clone() {
+                    let me = me.clone();
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                        let _ = me.update(cx, |this, cx| {
+                            this.history.step(n);
+                            this.load(window, cx);
+                        });
+                    }));
+                }
+                menu
+            })
+    }
+
     /// Esc while renaming: the old name stays.
     fn cancel_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.table.update(cx, |t, cx| {
@@ -2229,22 +2281,29 @@ impl Render for Explorer {
             .px_3()
             .py_2() // the same gap under the tabs as above the file list
             .child(
-                Button::new("back")
-                    .cursor_pointer()
-                    .ghost()
-                    .icon(IconName::ArrowLeft)
-                    .disabled(!can_back)
-                    .tooltip(tr!("Back (Alt+Left)", "Wstecz (Alt+Left)"))
-                    .on_click(cx.listener(|this, _, w, cx| this.go_back(&GoBack, w, cx))),
+                self.history_menu(true, cx).child(
+                    Button::new("back")
+                        .cursor_pointer()
+                        .ghost()
+                        .icon(IconName::ArrowLeft)
+                        .disabled(!can_back)
+                        .tooltip(tr!(
+                            "Back (Alt+Left; right-click: history)",
+                            "Wstecz (Alt+Left; prawy przycisk: historia)"
+                        ))
+                        .on_click(cx.listener(|this, _, w, cx| this.go_back(&GoBack, w, cx))),
+                ),
             )
             .child(
-                Button::new("forward")
-                    .cursor_pointer()
-                    .ghost()
-                    .icon(IconName::ArrowRight)
-                    .disabled(!can_forward)
-                    .tooltip(tr!("Forward (Alt+Right)", "Dalej (Alt+Right)"))
-                    .on_click(cx.listener(|this, _, w, cx| this.go_forward(&GoForward, w, cx))),
+                self.history_menu(false, cx).child(
+                    Button::new("forward")
+                        .cursor_pointer()
+                        .ghost()
+                        .icon(IconName::ArrowRight)
+                        .disabled(!can_forward)
+                        .tooltip(tr!("Forward (Alt+Right)", "Dalej (Alt+Right)"))
+                        .on_click(cx.listener(|this, _, w, cx| this.go_forward(&GoForward, w, cx))),
+                ),
             )
             .child(
                 Button::new("up")
