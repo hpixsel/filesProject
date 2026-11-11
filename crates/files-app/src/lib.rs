@@ -303,6 +303,7 @@ mod tests {
     }
 }
 
+pub mod bulk;
 pub mod favourites;
 
 /// What the window remembers between runs, in

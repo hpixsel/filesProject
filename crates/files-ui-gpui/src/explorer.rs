@@ -327,6 +327,153 @@ fn text_start(path: &Path) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// Renaming many items from one pattern: `#` is a number, `{name}` the old
+/// name; extensions stay. Nothing is renamed unless every new name is valid
+/// and free.
+struct BulkRename {
+    paths: Vec<PathBuf>,
+    input: Entity<InputState>,
+    error: Option<String>,
+    explorer: WeakEntity<Explorer>,
+}
+
+impl BulkRename {
+    fn new(
+        paths: Vec<PathBuf>,
+        explorer: WeakEntity<Explorer>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let input = cx.new(|cx| InputState::new(window, cx).default_value("{name} #"));
+        cx.subscribe_in(
+            &input,
+            window,
+            |this, _, ev: &InputEvent, window, cx| match ev {
+                InputEvent::Change => {
+                    this.error = None;
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => this.apply(window, cx),
+                _ => {}
+            },
+        )
+        .detach();
+        BulkRename {
+            paths,
+            input,
+            error: None,
+            explorer,
+        }
+    }
+
+    fn targets(&self, cx: &App) -> Vec<PathBuf> {
+        files_app::bulk::names(&self.paths, self.input.read(cx).value().trim(), 1)
+    }
+
+    fn apply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let to = self.targets(cx);
+        let bad = to.iter().find_map(|p| {
+            bad_name(
+                &p.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            )
+        });
+        if let Some(why) = bad {
+            self.error = Some(why);
+            return cx.notify();
+        }
+        if let Some(taken) = files_app::bulk::clash(&self.paths, &to) {
+            self.error = Some(tr!("Name taken: {}", "Nazwa zajęta: {}", taken.display()));
+            return cx.notify();
+        }
+        window.close_dialog(cx);
+        let from = self.paths.clone();
+        let n = from.len();
+        let done = cx.background_spawn(async move { files_app::bulk::rename_all(&from, &to) });
+        let explorer = self.explorer.clone();
+        cx.spawn(async move |_, cx| {
+            let r = done.await;
+            let _ = explorer.update(cx, |e, cx| {
+                e.notice = match r {
+                    Ok(()) => tr!("Renamed {n} items", "Zmieniono nazwy: {n}").into(),
+                    Err(err) => tr!("Cannot rename: {err}", "Nie można zmienić nazw: {err}").into(),
+                };
+                e.changed.store(true, Ordering::SeqCst);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
+
+impl Render for BulkRename {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme();
+        let (muted, danger) = (t.muted_foreground, t.danger);
+        let name = |p: &Path| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        let to = self.targets(cx);
+        let mut preview = div().v_flex().gap_0p5().text_sm();
+        for (f, t) in self.paths.iter().zip(&to).take(12) {
+            preview = preview.child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .child(div().flex_1().truncate().text_color(muted).child(name(f)))
+                    .child("→")
+                    .child(div().flex_1().truncate().child(name(t))),
+            );
+        }
+        if self.paths.len() > 12 {
+            preview = preview.child(div().text_color(muted).child(tr!(
+                "and {} more",
+                "i {} więcej",
+                self.paths.len() - 12
+            )));
+        }
+        div()
+            .v_flex()
+            .gap_2()
+            .child(Input::new(&self.input))
+            .child(div().text_xs().text_color(muted).child(tr!(
+                "# is a number (01, 02…), {{name}} the current name; extensions stay.",
+                "# to numer (01, 02…), {{name}} to obecna nazwa; rozszerzenia zostają."
+            )))
+            .child(preview)
+            .children(
+                self.error
+                    .clone()
+                    .map(|e| div().text_sm().text_color(danger).child(e)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .justify_end()
+                    .gap_2()
+                    .child(
+                        Button::new("bulk-cancel")
+                            .cursor_pointer()
+                            .outline()
+                            .label(tr!("Cancel", "Anuluj"))
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        Button::new("bulk-ok")
+                            .cursor_pointer()
+                            .primary()
+                            .label(tr!("Rename", "Zmień nazwy"))
+                            .on_click(cx.listener(|this, _, window, cx| this.apply(window, cx))),
+                    ),
+            )
+    }
+}
+
 /// A drive tile in This PC.
 #[derive(Clone)]
 struct Drive {
@@ -1239,8 +1386,12 @@ impl Explorer {
     /// F2: the name in its row becomes editable; Enter or clicking away
     /// renames, Esc cancels.
     fn rename(&mut self, _: &Rename, window: &mut Window, cx: &mut Context<Self>) {
-        let [path] = &self.selected(cx)[..] else {
-            return; // one item at a time
+        let selected = self.selected(cx);
+        if selected.len() > 1 && Place::of(self.history.current()) == Place::Folder {
+            return self.bulk_rename(selected, window, cx);
+        }
+        let [path] = &selected[..] else {
+            return;
         };
         if Place::of(self.history.current()) != Place::Folder {
             return;
@@ -2157,6 +2308,25 @@ impl Explorer {
                     .child(t)
             })),
         )
+    }
+
+    /// F2 with several items: one pattern names them all (see `BulkRename`).
+    fn bulk_rename(&mut self, paths: Vec<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let me = cx.weak_entity();
+        let view = cx.new(|cx| BulkRename::new(paths, me, window, cx));
+        let shown = view.clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            dialog
+                .title(tr!("Rename items", "Zmień nazwy"))
+                .w(px(560.))
+                .child(shown.clone())
+        });
+        view.update(cx, |v, cx| {
+            v.input.update(cx, |i, cx| {
+                i.focus(window, cx);
+                i.select_all(window, cx);
+            })
+        });
     }
 
     /// Esc while renaming: the old name stays.
