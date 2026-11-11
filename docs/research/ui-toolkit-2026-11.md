@@ -102,3 +102,22 @@ as an ADR.
 *   Slint Palette: https://docs.slint.dev/latest/docs/slint/reference/std-widgets/globals/palette/
 *   iced 0.14: https://github.com/iced-rs/iced/releases/tag/0.14.0
 *   windows-reactor: https://github.com/microsoft/windows-rs/pull/4479, https://gist.github.com/kennykerr/1b52f354496042b138abd835277268dd
+
+## Spike results so far (2026-11-11, Windows 11, 3440×1440)
+
+*   **100k-row gpui-kit table:** no stutter when scrolling. This is the
+    owner's own observation.
+*   **RAM after start:** about 140 MB private and about 67 MB working set,
+    which is under the 150 MB limit. CPU at idle is close to 0.
+*   **Accent-derived palette at runtime:** works in both modes, once
+    `theme.tokens` is recomputed with `ThemeTokens::from(colors)` after
+    the colours change. Without that, components such as buttons keep
+    their old colours.
+*   **Window backdrop:**
+    *   The owner chose **Blurred** (glass) as the default.
+    *   Mica and Mica Alt look almost opaque on this machine, because Mica
+        samples the static system wallpaper and the live wallpaper comes
+        from Wallpaper Engine.
+    *   Opaque needs a background alpha of 1.
+    *   Only one layer should be translucent. Translucent layers stack, and
+        together they hide the backdrop.
