@@ -158,8 +158,35 @@ session reads.
     *   **Lesson:** closing the window (X, Alt+F4, taskbar) does not quit the
         app, so `on_app_quit` never ran; saving now also happens in
         `on_window_should_close` and the title bar's close handler.
-11. **Next:** the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1), network
-    drives on the home network, then whatever the owner asks for next.
+11. **Everyday interactions (v0.6.0, tested by hand by the owner):**
+    *   **Panes:** a handle sets the two panes' widths (`h_resizable`); a
+        tab dragged onto a pane's files moves there, or splits one pane.
+    *   **Files:** dragged onto a folder row, a pane's list or a sidebar
+        entry (GPUI drag and drop, `DraggedFiles`); same drive moves, else
+        copies, Ctrl copies, Shift moves; `fileop::transfer` runs
+        `IFileOperation`. Inside the window only; dragging out to other apps
+        is not done.
+    *   **F2** renames in the row (Enter / click away / Esc); the context
+        menu's Rename (asked with `CMF_CANRENAME`, `shell::Picked::Rename`)
+        starts the same edit. `.lnk`/`.url` keep their hidden extension.
+    *   **Folder background menu** (New, Paste, Properties):
+        `shell::folder_menu` (`CreateViewObject`). The gpui-kit table takes
+        every right-click, so the list listens in the capture phase and opens
+        it when no row took the click.
+    *   **Keys:** sort by header (folders first, kept across folders), type
+        to jump, Backspace back, Ctrl+L / Alt+D / F4 address, Ctrl+Shift+N
+        new folder (then renamed in place), Esc clears, Alt+Enter Properties,
+        Ctrl+H hidden files.
+    *   **Hidden and system files** (desktop.ini) are hidden unless
+        `show_hidden` (settings, Ctrl+H).
+    *   **Shortcuts:** `.lnk` targets read with `IShellLinkW`; folder
+        shortcuts open here, with their own icons; names without `.lnk`/`.url`.
+    *   **Windows' icons** for programs and shortcuts and a **hover preview**
+        (photos, videos, PDFs through PowerToys) via `IShellItemImageFactory`
+        (`shell::shell_image`), loaded off the UI thread.
+12. **Next:** the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1), network
+    drives on the home network, dragging files out to other apps if wanted,
+    then whatever the owner asks for next.
 
 ## Open questions
 
