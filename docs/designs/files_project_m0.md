@@ -696,9 +696,13 @@ otherwise.
 *   **Update (2026-11-11):** Microsoft now has an official preview,
     `windows-reactor` in windows-rs. It is still a preview with a baseline
     of about 100 MB, so it is not a candidate, but it is worth watching.
-*   **M1 toolkit decision:** GPUI + gpui-kit as the first choice, with
-    eframe/egui as the fallback, settled by a 1–2 day spike. See
-    `docs/research/ui-toolkit-2026-11.md`.
+*   **M1 toolkit decision (owner, 2026-11-11):** GPUI + gpui-kit. The
+    owner uses Zed daily and is satisfied with how it looks and performs.
+    *   The 1–2 day spike in `docs/research/ui-toolkit-2026-11.md` still
+        runs, but only to validate the open risks: RAM on Windows, OLE
+        drop, and the context menu.
+    *   eframe/egui is the fallback only if the spike fails its pass
+        criteria.
 
 ### Alternative H: `jwalk` for folder size scanning (M2)
 

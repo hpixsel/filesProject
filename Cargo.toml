@@ -9,6 +9,10 @@ repository = "https://github.com/hpixsel/filesProject"
 
 [workspace.dependencies]
 files-core = { path = "crates/files-core" }
+files-win = { path = "crates/files-win" }
+tracing = "=0.1.44"
+windows = "=0.58.0"
+windows-core = "=0.58.0"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
