@@ -299,6 +299,8 @@ pub struct Listing {
     explorer: WeakEntity<Explorer>,
     /// The row being renamed (F2) and its name field.
     renaming: Option<(PathBuf, Entity<InputState>)>,
+    /// Set when a right-click hit a row, so the folder's menu stays shut.
+    row_menu: Arc<AtomicBool>,
 }
 
 impl Listing {
@@ -420,6 +422,7 @@ impl TableDelegate for Listing {
                 let (Some(h), false) = (hwnd(window), paths.is_empty()) else {
                     return;
                 };
+                l.row_menu.store(true, Ordering::SeqCst);
                 let (changed, me) = (l.changed.clone(), l.explorer.clone());
                 let handle = window.window_handle();
                 cx.stop_propagation(); // not the folder's own menu as well
@@ -549,6 +552,7 @@ impl Explorer {
             place: Place::Folder,
             explorer: cx.weak_entity(),
             renaming: None,
+            row_menu: Default::default(),
         };
         // Ctrl/Shift+click is ours (Listing::marked), not the table's single row.
         let table =
@@ -1490,10 +1494,23 @@ impl Render for Explorer {
                     .border_color(cx.theme().border)
                     .overflow_hidden()
                     // Right-click on the empty space: the folder's own menu (New, Paste...).
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(|this, _, window, cx| this.folder_menu(window, cx)),
-                    )
+                    // The table takes every right-click for its own menu, so this
+                    // listens first (capture) and opens the folder's menu once
+                    // the click is handled, unless a row took it.
+                    .capture_any_mouse_down(cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                        if e.button != MouseButton::Right {
+                            return;
+                        }
+                        let row = this.table.read(cx).delegate().row_menu.clone();
+                        row.store(false, Ordering::SeqCst);
+                        cx.spawn_in(window, async move |this, cx| {
+                            if !row.load(Ordering::SeqCst) {
+                                let _ = this
+                                    .update_in(cx, |this, window, cx| this.folder_menu(window, cx));
+                            }
+                        })
+                        .detach();
+                    }))
                     // Files dropped on the list (not on a folder row) land here.
                     .drag_over::<DraggedFiles>(move |s, _, _, _| s.border_color(drop_border))
                     .on_drop(cx.listener(|this, d: &DraggedFiles, window, _| {

@@ -455,3 +455,38 @@ pub fn empty_recycle_bin(window: isize) -> bool {
     // SAFETY: a valid owner window; no root means every drive.
     unsafe { SHEmptyRecycleBinW(hwnd(window), PCWSTR::null(), 0) }.is_ok()
 }
+
+#[cfg(test)]
+mod menu_tests {
+    use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetMenuItemCount, GetMenuStringW, MF_BYPOSITION,
+    };
+
+    /// The folder background menu builds outside Explorer (no window, no
+    /// view) and offers "New".
+    #[test]
+    fn folder_background_menu_has_items() {
+        let _sta = crate::Sta::new().unwrap();
+        let dir = std::env::temp_dir();
+        let pidls = Pidls::parse(std::slice::from_ref(&dir)).unwrap();
+        // SAFETY: as in `folder_menu`.
+        unsafe {
+            let folder: IShellFolder = SHBindToObject(None, pidls.0[0], None).unwrap();
+            let cm: IContextMenu = folder.CreateViewObject(HWND::default()).unwrap();
+            let menu = CreatePopupMenu().unwrap();
+            cm.QueryContextMenu(menu, 0, 1, 0x7FFF, CMF_NORMAL).unwrap();
+            let n = GetMenuItemCount(menu);
+            let names: Vec<String> = (0..n)
+                .map(|i| {
+                    let mut buf = [0u16; 128];
+                    let len = GetMenuStringW(menu, i as u32, Some(&mut buf), MF_BYPOSITION);
+                    String::from_utf16_lossy(&buf[..len.max(0) as usize])
+                })
+                .collect();
+            let _ = DestroyMenu(menu);
+            println!("{names:?}");
+            assert!(n > 0, "empty background menu");
+        }
+    }
+}
