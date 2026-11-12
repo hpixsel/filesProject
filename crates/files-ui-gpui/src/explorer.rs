@@ -115,11 +115,13 @@ pub fn drop_files(
     dest_list: Option<Arc<AtomicBool>>,
     cx: &mut App,
 ) {
-    // Not into itself, its own subfolder, or the folder it is already in.
+    // Ctrl copies: into the folder it is in, that makes a duplicate.
+    let copy = window.modifiers().control;
+    // Not into itself, its own subfolder, or (moving) the folder it is in.
     let paths: Vec<PathBuf> = d
         .paths
         .iter()
-        .filter(|p| !dest.starts_with(p) && p.parent() != Some(dest))
+        .filter(|p| !dest.starts_with(p) && (copy || p.parent() != Some(dest)))
         .cloned()
         .collect();
     let (Some(first), Some(h)) = (paths.first(), hwnd(window)) else {
@@ -1431,6 +1433,11 @@ impl Explorer {
         let name = shown
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+        // Like Explorer: a file's name is selected without its extension.
+        let stem = match name.rfind('.') {
+            Some(dot) if dot > 0 && !path.is_dir() => dot,
+            _ => name.len(),
+        };
         let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
         cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, window, cx| {
             if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
@@ -1440,7 +1447,7 @@ impl Explorer {
         .detach();
         input.update(cx, |i, cx| {
             i.focus(window, cx);
-            i.select_all(window, cx);
+            i.set_selected_range(0..stem, cx);
         });
         self.table.update(cx, |t, cx| {
             t.delegate_mut().renaming = Some((path, input));

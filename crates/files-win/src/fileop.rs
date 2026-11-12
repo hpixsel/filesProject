@@ -17,8 +17,9 @@ use windows::Win32::System::Ole::{OleFlushClipboard, OleGetClipboard, OleSetClip
 use windows::Win32::UI::Shell::{
     BHID_DataObject, FileOperation, IFileOperation, IFileOperationProgressSink,
     IFileOperationProgressSink_Impl, IShellItem, IShellItemArray, SHCreateItemFromParsingName,
-    SHCreateShellItemArrayFromIDLists, CFSTR_PREFERREDDROPEFFECT, FILEOPERATION_FLAGS,
-    FOF_ALLOWUNDO, FOF_NOCONFIRMMKDIR,
+    SHCreateShellItemArrayFromDataObject, SHCreateShellItemArrayFromIDLists,
+    CFSTR_PREFERREDDROPEFFECT, FILEOPERATION_FLAGS, FOF_ALLOWUNDO, FOF_NOCONFIRMMKDIR,
+    FOF_RENAMEONCOLLISION, SICHINT_CANONICAL,
 };
 
 const DROPEFFECT_MOVE: u32 = 2;
@@ -260,7 +261,19 @@ pub fn transfer_now(
     progress: Option<&Arc<OpProgress>>,
 ) -> Result<()> {
     let dest = item(dest)?;
-    let op = operation(window, FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR, progress)?;
+    // A copy into the folder it comes from is a duplicate ("Name - Copy");
+    // elsewhere Windows asks about names already taken.
+    let duplicate = !mv
+        && source_folder(items).is_some_and(|f| {
+            // SAFETY: two valid shell items.
+            let order = unsafe { f.Compare(&dest, SICHINT_CANONICAL.0 as u32) };
+            order == Ok(0)
+        });
+    let mut flags = FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR;
+    if duplicate {
+        flags |= FOF_RENAMEONCOLLISION;
+    }
+    let op = operation(window, flags, progress)?;
     // SAFETY: COM calls on this thread's apartment.
     unsafe {
         if mv {
@@ -271,6 +284,20 @@ pub fn transfer_now(
         op.PerformOperations()?;
     }
     Ok(())
+}
+
+/// The folder holding the first of `items` (shell items or a data object).
+fn source_folder(items: &windows::core::IUnknown) -> Option<IShellItem> {
+    // SAFETY: COM calls on this thread's apartment.
+    unsafe {
+        let array: IShellItemArray = match items.cast::<IShellItemArray>() {
+            Ok(a) => a,
+            Err(_) => {
+                SHCreateShellItemArrayFromDataObject(&items.cast::<IDataObject>().ok()?).ok()?
+            }
+        };
+        array.GetItemAt(0).ok()?.GetParent().ok()
+    }
 }
 
 /// Runs `f` on a new OLE thread, then marks `progress` finished and calls
