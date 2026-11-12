@@ -82,7 +82,9 @@ pub struct Workspace {
     /// A group whose name is being typed.
     editing_group: Option<(usize, Entity<InputState>)>,
     /// Drive roots, with the share for mapped network drives.
-    drives: Vec<(PathBuf, Option<String>)>,
+    drives: Vec<(PathBuf, Option<String>, bool)>,
+    /// The drive letters in use, to notice a USB stick going in or out.
+    drive_mask: u32,
     picker: Entity<ColorPickerState>,
     /// Read by the window's drop target at drop time: the active tab's folder…
     drop_dir: Arc<Mutex<PathBuf>>,
@@ -165,6 +167,16 @@ impl Workspace {
                     this.open_tab(dir, window, cx);
                     window.activate_window();
                 }
+                // A drive came or went (USB stick, card): list them again.
+                let mask = files_win::shell::drive_mask();
+                if mask != this.drive_mask {
+                    this.drive_mask = mask;
+                    this.drives = drives();
+                    for tab in this.panes.iter().flat_map(|p| p.tabs.iter()) {
+                        tab.read(cx).drives_changed();
+                    }
+                    cx.notify();
+                }
                 if crate::ops::tidy(cx) {
                     cx.notify(); // progress bars move
                 }
@@ -188,6 +200,7 @@ impl Workspace {
                 .unwrap_or_default(),
             editing_group: None,
             drives: drives(),
+            drive_mask: files_win::shell::drive_mask(),
             picker,
             drop_dir: Default::default(),
             drop_sink: Default::default(),
@@ -921,19 +934,30 @@ impl Workspace {
             let icon = Icon::empty().path(format!("icons/{icon}.svg"));
             side = side.child(entry(id.into(), label, icon, place.into(), cx));
         }
-        for (i, (d, share)) in self.drives.iter().enumerate() {
-            let icon = if share.is_some() {
-                IconName::Network
-            } else {
-                IconName::HardDrive
+        for (i, (d, share, removable)) in self.drives.iter().enumerate() {
+            let icon = match (share, removable) {
+                (Some(_), _) => Icon::new(IconName::Network),
+                (None, true) => Icon::empty().path("icons/usb.svg"),
+                (None, false) => Icon::new(IconName::HardDrive),
             };
+            let root = d.clone();
             let row = entry(
                 format!("drive-{i}").into(),
                 d.display().to_string(),
-                Icon::new(icon),
+                icon,
                 d.clone(),
                 cx,
-            );
+            )
+            // Windows' own drive menu: Eject, Format, Properties...
+            .on_mouse_down(MouseButton::Right, move |_, window, cx| {
+                let (Some(h), root) = (explorer::hwnd(window), root.clone()) else {
+                    return;
+                };
+                cx.spawn(async move |_: &mut AsyncApp| {
+                    let _ = files_win::shell::context_menu(h, &[root]);
+                })
+                .detach();
+            });
             // The share is secondary: muted, after the letter.
             side = side.child(match share {
                 Some(s) => row.child(
@@ -1251,12 +1275,15 @@ impl Render for Workspace {
     }
 }
 
-fn drives() -> Vec<(PathBuf, Option<String>)> {
+/// Drive roots, with the share of a network drive and whether it is
+/// removable (a USB stick).
+fn drives() -> Vec<(PathBuf, Option<String>, bool)> {
     files_win::shell::drives()
         .into_iter()
         .map(|d| {
             let share = files_win::shell::network_path(&d);
-            (d, share)
+            let removable = files_win::shell::is_removable(&d);
+            (d, share, removable)
         })
         .collect()
 }

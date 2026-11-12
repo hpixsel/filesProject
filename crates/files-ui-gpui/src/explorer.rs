@@ -501,6 +501,8 @@ struct Drive {
     root: PathBuf,
     name: String,
     network: bool,
+    /// A USB stick or card.
+    removable: bool,
     /// (free, total) bytes; `None` when the drive does not answer.
     space: Option<(u64, u64)>,
 }
@@ -521,6 +523,7 @@ fn this_pc() -> Vec<Drive> {
             Drive {
                 name: format!("{label} ({})", letter.trim_end_matches('\\')),
                 network: share.is_some(),
+                removable: files_win::shell::is_removable(&root),
                 space: files_win::io::disk_space(&root).ok(),
                 root,
             }
@@ -1440,8 +1443,14 @@ impl Explorer {
         };
         let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
         cx.subscribe_in(&input, window, |this, _, ev: &InputEvent, window, cx| {
-            if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
-                this.commit_rename(window, cx);
+            match ev {
+                // After this keystroke: the same Enter also reaches "open the
+                // selection", which must still see the rename in progress.
+                InputEvent::PressEnter { .. } => {
+                    cx.defer_in(window, |this, window, cx| this.commit_rename(window, cx))
+                }
+                InputEvent::Blur => this.commit_rename(window, cx),
+                _ => {}
             }
         })
         .detach();
@@ -2459,11 +2468,12 @@ impl Explorer {
                         .bg(track)
                         .child(div().h_full().rounded_full().bg(fill).w(relative(used)))
                 });
-            let icon = if d.network {
-                IconName::Network
-            } else {
-                IconName::HardDrive
+            let icon = match (d.network, d.removable) {
+                (true, _) => Icon::new(IconName::Network),
+                (false, true) => Icon::empty().path("icons/usb.svg"),
+                (false, false) => Icon::new(IconName::HardDrive),
             };
+            let menu_root = d.root.clone();
             div()
                 .id(("drive", ix))
                 .w(px(260.))
@@ -2476,8 +2486,7 @@ impl Explorer {
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover))
                 .child(
-                    Icon::new(icon)
-                        .with_size(gpui_kit::component::Size::Large)
+                    icon.with_size(gpui_kit::component::Size::Large)
                         .text_color(if d.space.is_some() { primary } else { muted }),
                 )
                 .child(
@@ -2494,6 +2503,21 @@ impl Explorer {
                 .on_mouse_down(
                     MouseButton::Middle,
                     cx.listener(move |_, _, _, cx| cx.emit(OpenInNewTab(middle.clone()))),
+                )
+                // Windows' own drive menu: Eject, Format, Properties...
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, _, window, cx| {
+                        let (Some(h), root) = (hwnd(window), menu_root.clone()) else {
+                            return;
+                        };
+                        let changed = this.changed.clone();
+                        outside_dispatch(cx, move || {
+                            if let Ok(Picked::Ran) = files_win::shell::context_menu(h, &[root]) {
+                                changed.store(true, Ordering::SeqCst);
+                            }
+                        });
+                    }),
                 )
         };
         let mut view = div()
@@ -2563,6 +2587,9 @@ impl Explorer {
     }
 
     fn open_sel(&mut self, _: &OpenSel, window: &mut Window, cx: &mut Context<Self>) {
+        if self.table.read(cx).delegate().renaming.is_some() {
+            return; // that Enter confirms the new name
+        }
         if let Some(ix) = self.table.read(cx).selected_row() {
             self.open_row(ix, window, cx);
         }
@@ -2690,6 +2717,13 @@ impl Explorer {
             )
             .into();
             cx.notify();
+        }
+    }
+
+    /// A drive came or went: This PC shows the drives again.
+    pub fn drives_changed(&self) {
+        if Place::of(self.history.current()) == Place::ThisPc {
+            self.changed.store(true, Ordering::SeqCst);
         }
     }
 

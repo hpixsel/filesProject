@@ -252,11 +252,25 @@ pub fn local_time(t: SystemTime) -> String {
     )
 }
 
+/// One bit per drive letter (A = bit 0). Cheap: polled to notice a USB
+/// stick going in or out.
+pub fn drive_mask() -> u32 {
+    // SAFETY: no arguments, returns a bitmask.
+    unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() }
+}
+
+/// True for a removable drive (a USB stick, a card reader).
+pub fn is_removable(root: &Path) -> bool {
+    use windows::Win32::Storage::FileSystem::GetDriveTypeW;
+    const DRIVE_REMOVABLE: u32 = 2;
+    // SAFETY: a NUL-terminated root like "E:\".
+    unsafe { GetDriveTypeW(&HSTRING::from(root.as_os_str())) == DRIVE_REMOVABLE }
+}
+
 /// Drive roots (`C:\`, `D:\`…). Uses the drive bitmask, so offline network
 /// drives cannot make it hang.
 pub fn drives() -> Vec<PathBuf> {
-    // SAFETY: no arguments, returns a bitmask.
-    let mask = unsafe { windows::Win32::Storage::FileSystem::GetLogicalDrives() };
+    let mask = drive_mask();
     (0..26u8)
         .filter(|i| mask & (1 << i) != 0)
         .map(|i| PathBuf::from(format!("{}:\\", (b'A' + i) as char)))
