@@ -54,3 +54,22 @@ fn copy_then_cut_and_paste() {
     let _ = std::fs::remove_dir_all(src);
     let _ = std::fs::remove_dir_all(dst);
 }
+
+#[test]
+fn copy_into_its_own_folder_duplicates() {
+    let dir = tmp("fileop-dup");
+    std::fs::write(dir.join("photo.jpg"), "x").unwrap();
+    let (tx, rx) = mpsc::channel();
+    fileop::transfer(
+        0,
+        vec![dir.join("photo.jpg")],
+        dir.clone(),
+        false,
+        Default::default(),
+        move |r| tx.send(r.map_err(|e| e.to_string())).unwrap(),
+    );
+    rx.recv_timeout(Duration::from_secs(30)).unwrap().unwrap();
+    // The copy's name is Windows' own, in the system language ("- Copy").
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+    let _ = std::fs::remove_dir_all(dir);
+}
