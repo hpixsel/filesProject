@@ -221,8 +221,14 @@ session reads.
         change, and Windows runners queue).
 14. **Also in v0.7.0:** the "Paste from RDP" button is gone; Ctrl+V pastes
     both kinds (real paths through Windows, virtual files through rdppaste).
-15. **Next:** the owner tries v0.7.0 at work (RDP pastes on real servers);
-    then the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1).
+15. **v0.7.1 / v0.7.2 (owner test at work):** copying into the same folder
+    duplicates (`FOF_RENAMEONCOLLISION` only then); F2 selects the name without
+    its extension; Enter in a rename does not also open the item (commit
+    deferred one frame); USB sticks: the drive list is compared each second
+    (an eject keeps the letter), empty removable drives are hidden, USB icon,
+    Windows' drive menu (Eject) on drives.
+16. **Next:** the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1) and
+    whatever the owner finds at work.
 
 ## Open questions
 

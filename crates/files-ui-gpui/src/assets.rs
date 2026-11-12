@@ -18,6 +18,7 @@ const OWN: &[(&str, &[u8])] = own!(
     "app",
     "monitor",
     "trash",
+    "usb",
     "file-archive",
     "file-symlink",
     "folder-symlink",
