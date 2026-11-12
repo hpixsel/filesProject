@@ -529,6 +529,8 @@ fn this_pc() -> Vec<Drive> {
             }
         })
         .collect();
+    // Like Explorer: an empty card reader or an ejected stick is hidden.
+    drives.retain(|d| !d.removable || d.space.is_some());
     drives.sort_by_key(|d| d.network);
     drives
 }

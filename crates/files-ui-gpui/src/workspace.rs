@@ -83,8 +83,10 @@ pub struct Workspace {
     editing_group: Option<(usize, Entity<InputState>)>,
     /// Drive roots, with the share for mapped network drives.
     drives: Vec<(PathBuf, Option<String>, bool)>,
-    /// The drive letters in use, to notice a USB stick going in or out.
+    /// The drive letters in use, to notice a USB stick going in or out,
+    /// and when the list was last compared.
     drive_mask: u32,
+    drives_at: std::time::Instant,
     picker: Entity<ColorPickerState>,
     /// Read by the window's drop target at drop time: the active tab's folder…
     drop_dir: Arc<Mutex<PathBuf>>,
@@ -167,15 +169,21 @@ impl Workspace {
                     this.open_tab(dir, window, cx);
                     window.activate_window();
                 }
-                // A drive came or went (USB stick, card): list them again.
+                // A drive came or went (USB stick, card) or was ejected (its
+                // letter stays, its media goes): checked at once when a letter
+                // changes, else once a second.
                 let mask = files_win::shell::drive_mask();
-                if mask != this.drive_mask {
+                if mask != this.drive_mask || this.drives_at.elapsed().as_secs() >= 1 {
                     this.drive_mask = mask;
-                    this.drives = drives();
-                    for tab in this.panes.iter().flat_map(|p| p.tabs.iter()) {
-                        tab.read(cx).drives_changed();
+                    this.drives_at = std::time::Instant::now();
+                    let now = drives();
+                    if now != this.drives {
+                        this.drives = now;
+                        for tab in this.panes.iter().flat_map(|p| p.tabs.iter()) {
+                            tab.read(cx).drives_changed();
+                        }
+                        cx.notify();
                     }
-                    cx.notify();
                 }
                 if crate::ops::tidy(cx) {
                     cx.notify(); // progress bars move
@@ -201,6 +209,7 @@ impl Workspace {
             editing_group: None,
             drives: drives(),
             drive_mask: files_win::shell::drive_mask(),
+            drives_at: std::time::Instant::now(),
             picker,
             drop_dir: Default::default(),
             drop_sink: Default::default(),
@@ -1280,10 +1289,14 @@ impl Render for Workspace {
 fn drives() -> Vec<(PathBuf, Option<String>, bool)> {
     files_win::shell::drives()
         .into_iter()
-        .map(|d| {
+        .filter_map(|d| {
             let share = files_win::shell::network_path(&d);
             let removable = files_win::shell::is_removable(&d);
-            (d, share, removable)
+            // Like Explorer: an empty card reader or an ejected stick is hidden.
+            if removable && files_win::io::disk_space(&d).is_err() {
+                return None;
+            }
+            Some((d, share, removable))
         })
         .collect()
 }
