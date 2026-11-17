@@ -227,7 +227,25 @@ session reads.
     deferred one frame); USB sticks: the drive list is compared each second
     (an eject keeps the letter), empty removable drives are hidden, USB icon,
     Windows' drive menu (Eject) on drives.
-16. **Next:** the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1) and
+16. **After v0.7.2 (branch `tabs-polish`):**
+    *   **Tabs:** own tab bar in `workspace::pane_view` (the kit's `TabBar`
+        variants did not match); style in settings (`tab_style`: underline,
+        pills, segmented); dropping a tab on a tab takes its place; the
+        current tab scrolls into view; closing or moving a tab before the
+        current one keeps the current one (`Pane::remove`).
+    *   **Search:** Esc closes it (the field binds Esc to its own `Escape`
+        action, so `capture_action` catches it first), plus an X button and
+        Ctrl+F again.
+    *   **Backspace** going back can be turned off (`backspace_back`).
+    *   **Look:** no double border on the list (the kit's `DataTable` has its
+        own, now `bordered(false)`); the frame is square at the top above a
+        table (clipping is not rounded); crumbs above the current folder
+        shrink in a narrow pane; drive bars have a visible track.
+    *   **Screenshots without input:** `PrintWindow`-free capture of the
+        window rect after editing `settings.txt` / `session.txt` and
+        restarting works for checking the look (scratch script, not in the
+        repo).
+17. **Next:** the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1) and
     whatever the owner finds at work.
 
 ## Open questions

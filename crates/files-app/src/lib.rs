@@ -324,6 +324,8 @@ pub mod settings {
         pub dark: bool,
         /// 0 normal, 1 compact, 2 very compact.
         pub density: usize,
+        /// Tabs look: 0 underline, 1 pills, 2 segmented.
+        pub tab_style: usize,
         /// Base text size in px for each density; it also scales paddings.
         pub fonts: [f32; 3],
         /// `None` follows the Windows display language.
@@ -332,6 +334,8 @@ pub mod settings {
         pub restore_tabs: bool,
         /// Show hidden and system files, like Explorer's option.
         pub show_hidden: bool,
+        /// Backspace goes to the previous folder, like Explorer.
+        pub backspace_back: bool,
         /// The list's columns after the name, in order: "size", "modified", "type".
         pub columns: Vec<String>,
         /// Column widths in px by column name, as last dragged.
@@ -344,10 +348,12 @@ pub mod settings {
                 accent: Some((217., 0.85)),
                 dark: true,
                 density: 0,
+                tab_style: 0,
                 fonts: [16., 14., 13.],
                 polish: None,
                 restore_tabs: true,
                 show_hidden: false,
+                backspace_back: true,
                 columns: vec!["size".into(), "modified".into(), "type".into()],
                 widths: Vec::new(),
             }
@@ -373,9 +379,11 @@ pub mod settings {
                 }
                 "dark" => s.dark = value != "false",
                 "density" => s.density = value.parse::<usize>().unwrap_or(0).min(2),
+                "tab_style" => s.tab_style = value.parse::<usize>().unwrap_or(0).min(2),
                 "lang" => s.polish = Some(value == "pl"),
                 "restore_tabs" => s.restore_tabs = value != "false",
                 "show_hidden" => s.show_hidden = value == "true",
+                "backspace_back" => s.backspace_back = value != "false",
                 "columns" => {
                     s.columns = value
                         .split(',')
@@ -418,6 +426,8 @@ pub mod settings {
             s.dark, s.density, s.restore_tabs
         );
         text += &format!("show_hidden={}\r\n", s.show_hidden);
+        text += &format!("backspace_back={}\r\n", s.backspace_back);
+        text += &format!("tab_style={}\r\n", s.tab_style);
         text += &format!("columns={}\r\n", s.columns.join(","));
         let widths: Vec<String> = s.widths.iter().map(|(n, w)| format!("{n}:{w}")).collect();
         text += &format!("widths={}\r\n", widths.join(","));
@@ -452,10 +462,12 @@ pub mod settings {
                 accent: Some((30.5, 0.4)),
                 dark: false,
                 density: 2,
+                tab_style: 1,
                 fonts: [18., 12.5, 11.],
                 polish: Some(true),
                 restore_tabs: false,
                 show_hidden: true,
+                backspace_back: false,
                 columns: vec!["type".into(), "size".into()],
                 widths: vec![("name".into(), 300.), ("type".into(), 120.5)],
             };
