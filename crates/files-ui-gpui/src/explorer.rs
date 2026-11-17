@@ -1982,13 +1982,26 @@ impl Explorer {
                 continue;
             }
             if ix > 0 {
-                bar = bar.child(Icon::new(IconName::ChevronRight).xsmall().text_color(muted));
+                bar = bar.child(
+                    Icon::new(IconName::ChevronRight)
+                        .xsmall()
+                        .flex_shrink_0()
+                        .text_color(muted),
+                );
             }
             let (go, tab, drop_to) = (path.clone(), path.clone(), path.clone());
             bar = bar.child(
                 div()
                     .id(("crumb", ix))
-                    .flex_shrink_0()
+                    // In a narrow pane the levels above shrink to "…", so
+                    // the current folder stays in view.
+                    .map(|s| {
+                        if ix == last {
+                            s.flex_shrink_0()
+                        } else {
+                            s.min_w(px(28.)).truncate()
+                        }
+                    })
                     .px_2()
                     .py_0p5()
                     .rounded(radius)
@@ -2446,7 +2459,7 @@ impl Explorer {
             t.muted_foreground,
             t.primary,
             t.table_hover,
-            t.muted,
+            t.input, // visible against the list, unlike `muted`
             t.radius,
         );
         let danger = t.danger;
@@ -3157,9 +3170,16 @@ impl Render for Explorer {
                 div()
                     .flex_1()
                     .mx_3()
-                    // Square at the top: clipping is not rounded, so the
-                    // header's background would stick out of round corners.
-                    .rounded_b(cx.theme().radius_lg)
+                    // Square at the top above the table: clipping is not
+                    // rounded, so its header would stick out of round corners.
+                    .map(|s| {
+                        let r = cx.theme().radius_lg;
+                        if self.grid || Place::of(self.history.current()) == Place::ThisPc {
+                            s.rounded(r)
+                        } else {
+                            s.rounded_b(r)
+                        }
+                    })
                     .border_1()
                     .border_color(cx.theme().border)
                     .overflow_hidden()

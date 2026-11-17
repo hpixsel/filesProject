@@ -52,11 +52,32 @@ pub fn bind_keys(cx: &mut App) {
 struct Pane {
     tabs: Vec<Entity<Explorer>>,
     active: usize,
+    /// The tab bar's scroll, and the tab last scrolled into view.
+    scroll: ScrollHandle,
+    shown: std::cell::Cell<Option<usize>>,
 }
 
 impl Pane {
+    fn new(tabs: Vec<Entity<Explorer>>, active: usize) -> Self {
+        Pane {
+            tabs,
+            active,
+            scroll: ScrollHandle::new(),
+            shown: Default::default(),
+        }
+    }
+
     fn current(&self) -> &Entity<Explorer> {
         &self.tabs[self.active]
+    }
+
+    /// Removes a tab; the same tab stays current unless it was this one.
+    fn remove(&mut self, ix: usize) {
+        self.tabs.remove(ix);
+        if ix < self.active {
+            self.active -= 1;
+        }
+        self.active = self.active.min(self.tabs.len().saturating_sub(1));
     }
 }
 
@@ -116,21 +137,22 @@ impl Workspace {
             Some(s) => (
                 s.panes
                     .iter()
-                    .map(|(dirs, active)| Pane {
-                        tabs: dirs
-                            .iter()
-                            .map(|d| Self::explorer(d.clone(), window, cx))
-                            .collect(),
-                        active: *active,
+                    .map(|(dirs, active)| {
+                        Pane::new(
+                            dirs.iter()
+                                .map(|d| Self::explorer(d.clone(), window, cx))
+                                .collect(),
+                            *active,
+                        )
                     })
                     .collect(),
                 s.active_pane,
             ),
             None => (
-                vec![Pane {
-                    tabs: vec![Self::explorer(start.clone(), window, cx)],
-                    active: 0,
-                }],
+                vec![Pane::new(
+                    vec![Self::explorer(start.clone(), window, cx)],
+                    0,
+                )],
                 0,
             ),
         };
@@ -349,10 +371,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let pane = &mut self.panes[pane_ix];
-        if pane.tabs.len() > 1 {
-            pane.tabs.remove(tab_ix);
-            pane.active = pane.active.min(pane.tabs.len() - 1);
+        if self.panes[pane_ix].tabs.len() > 1 {
+            self.panes[pane_ix].remove(tab_ix);
         } else if self.panes.len() > 1 {
             self.panes.remove(pane_ix);
             self.active_pane = 0;
@@ -382,10 +402,7 @@ impl Workspace {
         } else {
             let dir = self.active().read(cx).current_dir().to_path_buf();
             let tab = Self::explorer(dir, window, cx);
-            self.panes.push(Pane {
-                tabs: vec![tab],
-                active: 0,
-            });
+            self.panes.push(Pane::new(vec![tab], 0));
             self.active_pane = 1;
         }
         self.focus_active(window, cx);
@@ -474,19 +491,16 @@ impl Workspace {
                 return; // already there
             }
             let moved = if self.panes[from].tabs.len() > 1 {
-                self.take_tab(from, ix);
+                self.panes[from].remove(ix);
                 tab
             } else {
                 let dir = tab.read(cx).current_dir().to_path_buf();
                 Self::explorer(dir, window, cx)
             };
-            self.panes.push(Pane {
-                tabs: vec![moved],
-                active: 0,
-            });
+            self.panes.push(Pane::new(vec![moved], 0));
             self.active_pane = self.panes.len() - 1;
         } else {
-            self.take_tab(from, ix);
+            self.panes[from].remove(ix);
             let pane = &mut self.panes[to];
             pane.tabs.push(tab);
             pane.active = pane.tabs.len() - 1;
@@ -516,7 +530,7 @@ impl Workspace {
         if (from, ix) == (to, at) || to >= self.panes.len() {
             return;
         }
-        self.take_tab(from, ix);
+        self.panes[from].remove(ix);
         let pane = &mut self.panes[to];
         let at = at.min(pane.tabs.len());
         pane.tabs.insert(at, tab);
@@ -527,13 +541,6 @@ impl Workspace {
             self.active_pane = 0;
         }
         self.focus_active(window, cx);
-    }
-
-    /// Removes a tab from its pane, keeping that pane's active index valid.
-    fn take_tab(&mut self, pane_ix: usize, ix: usize) {
-        let pane = &mut self.panes[pane_ix];
-        pane.tabs.remove(ix);
-        pane.active = pane.active.min(pane.tabs.len().saturating_sub(1));
     }
 
     /// Ctrl+Shift+P: every command, then recent and favourite folders.
@@ -1080,8 +1087,12 @@ impl Workspace {
             t.input,
             t.radius,
         );
-        let drop_line = t.drag_border;
+        let drop_bg = t.drag_border.opacity(0.25);
         let style = crate::prefs::get(cx).tab_style;
+        // Keep the current tab in view when it changes (Ctrl+Tab, new tab).
+        if pane.shown.replace(Some(pane.active)) != Some(pane.active) {
+            pane.scroll.scroll_to_item(pane.active);
+        }
         let mut bar = div()
             .id(("tabs", pane_ix))
             .flex()
@@ -1089,6 +1100,7 @@ impl Workspace {
             .items_center()
             .gap_1()
             .overflow_x_scroll()
+            .track_scroll(&pane.scroll)
             .when(style == 2, |s| {
                 s.p_0p5().rounded(radius).bg(t.muted).w_full()
             });
@@ -1168,8 +1180,13 @@ impl Workspace {
                         |d, _, _, cx| cx.new(|_| d.clone()),
                     )
                     // Dropped on a tab: takes its place (reorder).
-                    .drag_over::<DraggedTab>(move |s, _, _, _| {
-                        s.border_l_2().border_color(drop_line)
+                    // A tint, not a border: a border would widen the tab.
+                    .drag_over::<DraggedTab>(move |s, d, _, _| {
+                        if (d.pane, d.ix) == (pane_ix, tab_ix) {
+                            s
+                        } else {
+                            s.bg(drop_bg)
+                        }
                     })
                     .on_drop(cx.listener(move |this, d: &DraggedTab, window, cx| {
                         this.place_tab(d.pane, d.ix, pane_ix, tab_ix, window, cx)
