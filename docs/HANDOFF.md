@@ -227,7 +227,7 @@ session reads.
     deferred one frame); USB sticks: the drive list is compared each second
     (an eject keeps the letter), empty removable drives are hidden, USB icon,
     Windows' drive menu (Eject) on drives.
-16. **After v0.7.2 (branch `tabs-polish`):**
+16. **v0.8.0 (branch `tabs-polish`):**
     *   **Tabs:** own tab bar in `workspace::pane_view` (the kit's `TabBar`
         variants did not match); style in settings (`tab_style`: underline,
         pills, segmented); dropping a tab on a tab takes its place; the
