@@ -49,6 +49,7 @@ actions!(
         ToggleHidden,
         ToggleGrid,
         Search,
+        BackKey,
         GridLeft,
         GridRight,
         GridUp,
@@ -181,7 +182,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-alt-t", OpenTerminal, Some(CONTEXT)),
         KeyBinding::new("f2", Rename, Some(CONTEXT)),
         // Explorer's keys: Backspace goes back, Ctrl+L/Alt+D/F4 to the address.
-        KeyBinding::new("backspace", GoBack, Some(CONTEXT)),
+        KeyBinding::new("backspace", BackKey, Some(CONTEXT)),
         KeyBinding::new("ctrl-l", FocusAddress, Some(CONTEXT)),
         KeyBinding::new("alt-d", FocusAddress, Some(CONTEXT)),
         KeyBinding::new("f4", FocusAddress, Some(CONTEXT)),
@@ -2023,6 +2024,10 @@ impl Explorer {
     /// searches its subfolders.
     fn search(&mut self, _: &Search, window: &mut Window, cx: &mut Context<Self>) {
         let input = match &self.search {
+            // Ctrl+F again in the field closes it.
+            Some(i) if i.focus_handle(cx).is_focused(window) => {
+                return self.close_search(window, cx);
+            }
             Some(i) => i.clone(),
             None => {
                 let input = cx.new(|cx| {
@@ -2900,16 +2905,27 @@ impl Render for Explorer {
             )
             .children(self.search.clone().map(|input| {
                 let me = cx.weak_entity();
+                let close = Button::new("close-search")
+                    .cursor_pointer()
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Close)
+                    .tooltip(tr!("Close search (Esc)", "Zamknij wyszukiwanie (Esc)"))
+                    .on_click(cx.listener(|this, _, w, cx| this.close_search(w, cx)));
                 div()
                     .w(px(240.))
                     // Esc closes the search and shows the whole folder again.
-                    .on_key_down(move |e: &KeyDownEvent, window, cx| {
-                        if e.keystroke.key == "escape" {
-                            let _ = me.update(cx, |this, cx| this.close_search(window, cx));
-                            cx.stop_propagation();
-                        }
+                    // The field binds Esc to its own action, so catch that
+                    // action first.
+                    .capture_action(move |_: &gpui_kit::component::input::Escape, window, cx| {
+                        let _ = me.update(cx, |this, cx| this.close_search(window, cx));
+                        cx.stop_propagation();
                     })
-                    .child(Input::new(&input).prefix(Icon::new(IconName::Search).xsmall()))
+                    .child(
+                        Input::new(&input)
+                            .prefix(Icon::new(IconName::Search).xsmall())
+                            .suffix(close),
+                    )
             }))
             .child(if self.editing_address {
                 let me = cx.weak_entity();
@@ -3102,6 +3118,12 @@ impl Render for Explorer {
             .on_action(cx.listener(Self::properties))
             .on_action(cx.listener(Self::toggle_grid))
             .on_action(cx.listener(Self::search))
+            // Backspace goes back unless turned off in the settings.
+            .on_action(cx.listener(|this, _: &BackKey, w, cx| {
+                if crate::prefs::get(cx).backspace_back {
+                    this.go_back(&GoBack, w, cx)
+                }
+            }))
             .on_action(cx.listener(|this, _: &TogglePane, _, cx| {
                 this.pane_open = !this.pane_open;
                 cx.notify();
@@ -3135,7 +3157,9 @@ impl Render for Explorer {
                 div()
                     .flex_1()
                     .mx_3()
-                    .rounded(cx.theme().radius_lg)
+                    // Square at the top: clipping is not rounded, so the
+                    // header's background would stick out of round corners.
+                    .rounded_b(cx.theme().radius_lg)
                     .border_1()
                     .border_color(cx.theme().border)
                     .overflow_hidden()
@@ -3176,6 +3200,8 @@ impl Render for Explorer {
                                 } else {
                                     DataTable::new(&self.table)
                                         .with_size(theme::table_size())
+                                        // The frame around the list is the border.
+                                        .bordered(false)
                                         .into_any_element()
                                 },
                             ))

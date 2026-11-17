@@ -101,6 +101,18 @@ fn page(picker: Entity<ColorPickerState>) -> Settings {
                             |v, cx| prefs::set(cx, |s| s.density = v.parse().unwrap_or(0)),
                         ),
                     ),
+                    SettingItem::new(
+                        tr!("Tabs", "Karty"),
+                        SettingField::dropdown(
+                            options(&[
+                                ("0", tr!("Underline", "Podkreślenie")),
+                                ("1", tr!("Pills", "Pastylki")),
+                                ("2", tr!("Segmented", "Segmenty")),
+                            ]),
+                            |cx| prefs::get(cx).tab_style.to_string().into(),
+                            |v, cx| prefs::set(cx, |s| s.tab_style = v.parse().unwrap_or(0)),
+                        ),
+                    ),
                     font(0, tr!("Text size: normal", "Rozmiar tekstu: zwykła")),
                     font(1, tr!("Text size: compact", "Rozmiar tekstu: kompaktowa")),
                     font(
@@ -154,7 +166,17 @@ fn page(picker: Entity<ColorPickerState>) -> Settings {
                     "Hidden and system files, like desktop.ini.",
                     "Pliki ukryte i systemowe, np. desktop.ini."
                 )),
-            ),
+            )
+            .item(SettingItem::new(
+                tr!(
+                    "Backspace goes to the previous folder",
+                    "Backspace cofa do poprzedniego folderu"
+                ),
+                SettingField::switch(
+                    |cx| prefs::get(cx).backspace_back,
+                    |v, cx| prefs::set(cx, |s| s.backspace_back = v),
+                ),
+            )),
         )
         .group(
             SettingGroup::new()

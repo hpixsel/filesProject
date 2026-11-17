@@ -12,8 +12,8 @@ use gpui_kit::component::button::*;
 use gpui_kit::component::color_picker::{ColorPickerEvent, ColorPickerState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{ContextMenuExt, PopupMenuItem};
-use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::*;
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -495,6 +495,36 @@ impl Workspace {
                 self.panes.remove(from);
                 self.active_pane = 0;
             }
+        }
+        self.focus_active(window, cx);
+    }
+
+    /// A tab dropped on another tab takes that tab's place, in the same pane
+    /// (reordering) or another one.
+    fn place_tab(
+        &mut self,
+        from: usize,
+        ix: usize,
+        to: usize,
+        at: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.panes.get(from).and_then(|p| p.tabs.get(ix)).cloned() else {
+            return;
+        };
+        if (from, ix) == (to, at) || to >= self.panes.len() {
+            return;
+        }
+        self.take_tab(from, ix);
+        let pane = &mut self.panes[to];
+        let at = at.min(pane.tabs.len());
+        pane.tabs.insert(at, tab);
+        pane.active = at;
+        self.active_pane = to;
+        if self.panes[from].tabs.is_empty() {
+            self.panes.remove(from);
+            self.active_pane = 0;
         }
         self.focus_active(window, cx);
     }
@@ -1038,32 +1068,96 @@ impl Workspace {
     fn pane_view(&self, pane_ix: usize, cx: &mut Context<Self>) -> Div {
         let pane = &self.panes[pane_ix];
         let focused = pane_ix == self.active_pane && self.panes.len() > 1;
-        let mut bar = TabBar::new(("tabs", pane_ix))
-            .selected_index(pane.active)
-            .on_click(cx.listener(move |this, ix: &usize, window, cx| {
-                // A click on a tab's close button reaches the tab too, after
-                // the close: that tab, or its whole pane, may be gone.
-                let Some(pane) = this.panes.get_mut(pane_ix) else {
-                    return;
-                };
-                pane.active = (*ix).min(pane.tabs.len() - 1);
-                this.active_pane = pane_ix;
-                this.focus_active(window, cx);
-            }));
+        // Own tabs, styled like the address crumbs (the kit's tab bar
+        // variants do not match the rest of the window).
+        let t = cx.theme();
+        let (fg, muted, hover, active_bg, primary, raised, radius) = (
+            t.foreground,
+            t.muted_foreground,
+            t.table_hover,
+            t.table_active,
+            t.primary,
+            t.input,
+            t.radius,
+        );
+        let drop_line = t.drag_border;
+        let style = crate::prefs::get(cx).tab_style;
+        let mut bar = div()
+            .id(("tabs", pane_ix))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .overflow_x_scroll()
+            .when(style == 2, |s| {
+                s.p_0p5().rounded(radius).bg(t.muted).w_full()
+            });
         for (tab_ix, tab) in pane.tabs.iter().enumerate() {
+            let on = tab_ix == pane.active;
+            let group: SharedString = format!("tab-{pane_ix}-{tab_ix}").into();
             let close = Button::new(("close", pane_ix * 1000 + tab_ix))
                 .cursor_pointer()
                 .ghost()
                 .xsmall()
                 .icon(IconName::Close)
-                .on_click(
-                    cx.listener(move |this, _, window, cx| this.close(pane_ix, tab_ix, window, cx)),
-                );
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.close(pane_ix, tab_ix, window, cx)
+                }));
             bar = bar.child(
-                Tab::new()
+                div()
+                    .id(("tab", pane_ix * 1000 + tab_ix))
+                    .group(group.clone())
+                    .flex()
+                    .flex_row()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap_1p5()
+                    .h_8()
+                    .max_w(px(240.))
+                    .pl_2p5()
+                    .pr_1()
                     .cursor_pointer()
-                    .label(tab.read(cx).title())
-                    .suffix(close)
+                    .text_color(if on { fg } else { muted })
+                    .map(|s| match (style, on) {
+                        // Underline: the accent under the current tab.
+                        (0, _) => s
+                            .rounded_t(radius)
+                            .border_b_2()
+                            .border_color(if on {
+                                primary
+                            } else {
+                                gpui_kit::transparent_black()
+                            })
+                            .hover(move |s| s.bg(hover).text_color(fg)),
+                        // Pills: the current one tinted with the accent.
+                        (1, true) => s.rounded_full().bg(active_bg),
+                        (1, false) => s.rounded_full().hover(move |s| s.bg(hover).text_color(fg)),
+                        // Segmented: the current one raised from the bar.
+                        (_, true) => s.rounded(radius).bg(raised).shadow_xs(),
+                        (_, false) => s.rounded(radius).hover(move |s| s.bg(hover).text_color(fg)),
+                    })
+                    .child(Icon::new(IconName::Folder).xsmall().text_color(if on {
+                        primary
+                    } else {
+                        muted
+                    }))
+                    .child(div().min_w_0().truncate().child(tab.read(cx).title()))
+                    // The close button shows on the current tab and on hover.
+                    .child(
+                        div()
+                            .when(!on, |s| s.invisible())
+                            .group_hover(group, |s| s.visible())
+                            .child(close),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let Some(pane) = this.panes.get_mut(pane_ix) else {
+                            return;
+                        };
+                        pane.active = tab_ix.min(pane.tabs.len() - 1);
+                        this.active_pane = pane_ix;
+                        this.focus_active(window, cx);
+                    }))
                     // Dragged onto a pane's files: moves there, or splits.
                     .on_drag(
                         DraggedTab {
@@ -1073,6 +1167,13 @@ impl Workspace {
                         },
                         |d, _, _, cx| cx.new(|_| d.clone()),
                     )
+                    // Dropped on a tab: takes its place (reorder).
+                    .drag_over::<DraggedTab>(move |s, _, _, _| {
+                        s.border_l_2().border_color(drop_line)
+                    })
+                    .on_drop(cx.listener(move |this, d: &DraggedTab, window, cx| {
+                        this.place_tab(d.pane, d.ix, pane_ix, tab_ix, window, cx)
+                    }))
                     // Like a browser: the middle button closes a tab.
                     .on_mouse_down(
                         MouseButton::Middle,
