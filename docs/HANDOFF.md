@@ -245,7 +245,7 @@ session reads.
         window rect after editing `settings.txt` / `session.txt` and
         restarting works for checking the look (scratch script, not in the
         repo).
-17. **After v0.8.0 (branch `search-crumbs`):** opening another folder
+17. **v0.9.0 (branch `search-crumbs`):** opening another folder
     closes the search (`Explorer::loaded`; a reload of the same folder
     keeps the filter); Ctrl+F also works from the sidebar, the tabs and
     the address (a `Workspace` binding calls the active tab's `search`);
