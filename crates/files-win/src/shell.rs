@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use windows::core::{Interface, HSTRING, PCSTR, PCWSTR};
 use windows::Win32::Foundation::{FILETIME, HWND, LPARAM, LRESULT, POINT, SYSTEMTIME, WPARAM};
@@ -18,7 +19,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, DestroyMenu, GetCursorPos, TrackPopupMenuEx, SW_SHOWNORMAL, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR,
+    TPM_RIGHTBUTTON, WM_DRAWITEM, WM_INITMENUPOPUP, WM_MEASUREITEM, WM_MENUCHAR, WM_NCACTIVATE,
 };
 
 fn hwnd(raw: isize) -> HWND {
@@ -308,7 +309,8 @@ pub fn ui_is_polish() -> bool {
 /// Windows 11's own acrylic backdrop (DWMSBT_TRANSIENTWINDOW). It moves with
 /// the window smoothly, unlike the older `SetWindowCompositionAttribute`
 /// acrylic behind GPUI's `Blurred`, which lags while dragging. Older Windows
-/// ignores it and keeps what was set before.
+/// ignores it and keeps what was set before. Also lets `keep_backdrop` keep
+/// it while the window is not active.
 pub fn set_acrylic(window: isize) {
     use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_SYSTEMBACKDROP_TYPE};
     let acrylic = 3u32;
@@ -321,6 +323,34 @@ pub fn set_acrylic(window: isize) {
             4,
         )
     };
+    // SAFETY: a valid window; id 2 is this subclass (the menu's is 1).
+    let _ = unsafe { SetWindowSubclass(hwnd(window), Some(backdrop_subclass), 2, 0) };
+}
+
+static KEEP_BACKDROP: AtomicBool = AtomicBool::new(false);
+
+/// Windows turns the backdrop solid when the window loses focus; with `on`
+/// the frame is told it is still active, so the acrylic stays. Takes effect
+/// at the next focus change. GPUI tracks focus by WM_ACTIVATE, not this.
+pub fn keep_backdrop(on: bool) {
+    KEEP_BACKDROP.store(on, Ordering::Relaxed);
+}
+
+extern "system" fn backdrop_subclass(
+    h: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    _: usize,
+    _: usize,
+) -> LRESULT {
+    let wp = if msg == WM_NCACTIVATE && KEEP_BACKDROP.load(Ordering::Relaxed) {
+        WPARAM(1)
+    } else {
+        wp
+    };
+    // SAFETY: forwards the window's own message.
+    unsafe { DefSubclassProc(h, msg, wp, lp) }
 }
 
 /// The share a mapped network drive points to, like `\\server\share`.

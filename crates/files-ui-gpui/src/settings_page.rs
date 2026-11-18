@@ -67,20 +67,36 @@ fn page(picker: Entity<ColorPickerState>) -> Settings {
         )
     };
     let appearance = SettingPage::new(tr!("Appearance", "Wygląd"))
-        .group(SettingGroup::new().title(tr!("Theme", "Motyw")).items([
-            SettingItem::new(
-                tr!("Mode", "Tryb"),
-                SettingField::dropdown(
-                    options(&[
-                        ("dark", tr!("Dark", "Ciemny")),
-                        ("light", tr!("Light", "Jasny")),
-                    ]),
-                    |cx| if prefs::get(cx).dark { "dark" } else { "light" }.into(),
-                    |v, cx| prefs::set(cx, |s| s.dark = v == "dark"),
+        .group(
+            SettingGroup::new().title(tr!("Theme", "Motyw")).items([
+                SettingItem::new(
+                    tr!("Mode", "Tryb"),
+                    SettingField::dropdown(
+                        options(&[
+                            ("dark", tr!("Dark", "Ciemny")),
+                            ("light", tr!("Light", "Jasny")),
+                        ]),
+                        |cx| if prefs::get(cx).dark { "dark" } else { "light" }.into(),
+                        |v, cx| prefs::set(cx, |s| s.dark = v == "dark"),
+                    ),
                 ),
-            ),
-            SettingItem::render(move |_, _, cx| accent_row(&picker, cx)),
-        ]))
+                SettingItem::render(move |_, _, cx| accent_row(&picker, cx)),
+                SettingItem::new(
+                    tr!(
+                        "Solid background when the window is not active",
+                        "Pełne tło, gdy okno nie jest aktywne"
+                    ),
+                    SettingField::switch(
+                        |cx| prefs::get(cx).solid_unfocused,
+                        |v, cx| prefs::set(cx, |s| s.solid_unfocused = v),
+                    ),
+                )
+                .description(tr!(
+                    "Off keeps the see-through background after clicking another window.",
+                    "Wyłączone zostawia przezroczyste tło po kliknięciu innego okna."
+                )),
+            ]),
+        )
         .group(
             SettingGroup::new()
                 .title(tr!("Density", "Gęstość"))

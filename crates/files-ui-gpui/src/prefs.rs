@@ -35,4 +35,5 @@ pub fn set(cx: &mut App, change: impl FnOnce(&mut Settings)) {
 fn apply(s: &Settings, cx: &mut App) {
     i18n::set_polish(s.polish.unwrap_or_else(files_win::shell::ui_is_polish));
     theme::apply(s, cx);
+    files_win::shell::keep_backdrop(!s.solid_unfocused);
 }

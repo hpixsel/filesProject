@@ -254,6 +254,11 @@ session reads.
     and the current folder stays whole. Sidebar groups fold with a click
     on their header (chevron); folded ones are kept by name in settings
     (`collapsed=`, `*drives` for the drives; a rename carries it over).
+    Setting "Solid background when the window is not active"
+    (`solid_unfocused`, on by default): off, a subclass on the window
+    (`files_win::shell::keep_backdrop`, installed by `set_acrylic`) passes
+    WM_NCACTIVATE as active, so DWM keeps the acrylic; GPUI's own focus
+    uses WM_ACTIVATE. Unverified on screen yet.
 18. **Next:** the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1) and
     whatever the owner finds at work.
 
