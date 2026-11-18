@@ -954,6 +954,37 @@ impl TableDelegate for Listing {
                     .map(files_win::shell::local_time)
                     .unwrap_or_default(),
             ),
+            // A search result's folder: a click opens it with the item selected.
+            Col::Origin if self.found => {
+                let (fg, me, path) = (
+                    cx.theme().foreground,
+                    self.explorer.clone(),
+                    item.path.clone(),
+                );
+                div().child(
+                    div()
+                        .id(("origin", row_ix))
+                        .text_color(muted)
+                        .hover(move |s| s.text_color(fg).underline())
+                        .tooltip(|window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(tr!(
+                                "Open file location",
+                                "Otwórz lokalizację pliku"
+                            ))
+                            .build(window, cx)
+                        })
+                        .on_click(move |_, window, cx| {
+                            let path = path.clone();
+                            let _ = me.update(cx, |this, cx| this.reveal(path, window, cx));
+                        })
+                        .child(
+                            item.origin
+                                .as_ref()
+                                .map(|o| o.display().to_string())
+                                .unwrap_or_default(),
+                        ),
+                )
+            }
             Col::Origin => div().text_color(muted).child(
                 item.origin
                     .as_ref()
@@ -998,6 +1029,8 @@ pub struct Explorer {
     drives: Vec<Drive>,
     /// A folder just made with Ctrl+Shift+N, renamed once the list shows it.
     pending_rename: Option<PathBuf>,
+    /// An item selected once its folder shows (a search result's location).
+    reveal: Option<PathBuf>,
     /// The address shows as clickable crumbs; this is true while it is typed in.
     editing_address: bool,
     /// The search field (Ctrl+F) while it is open.
@@ -1139,6 +1172,7 @@ impl Explorer {
             shown_hidden: false,
             drives: Vec::new(),
             pending_rename: None,
+            reveal: None,
             editing_address: false,
             search: None,
             loaded: PathBuf::new(),
@@ -1285,14 +1319,17 @@ impl Explorer {
                             }
                         });
                         // Ctrl+Shift+N: the new folder's name is edited right away.
-                        if let Some(new) = this.pending_rename.take() {
+                        let rename = this.pending_rename.take();
+                        if let Some(new) = rename.clone().or(this.reveal.take()) {
                             let items = &this.table.read(cx).delegate().items;
                             if let Some(ix) = items.iter().position(|i| i.path == new) {
                                 this.table.update(cx, |t, cx| {
                                     t.set_selected_row(ix, cx);
                                     t.scroll_to_row(ix, cx);
                                 });
-                                this.rename(&Rename, window, cx);
+                                if rename.is_some() {
+                                    this.rename(&Rename, window, cx);
+                                }
                             }
                         }
                     }
@@ -2775,6 +2812,16 @@ impl Explorer {
         dir.file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| dir.display().to_string())
+    }
+
+    /// Opens the folder holding `path` and selects it there.
+    fn reveal(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dir) = path.parent().map(Path::to_path_buf) else {
+            return;
+        };
+        self.close_search(window, cx);
+        self.reveal = Some(path);
+        self.go_to(dir, window, cx);
     }
 
     pub fn go_to(&mut self, dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) {

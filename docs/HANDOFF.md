@@ -258,7 +258,9 @@ session reads.
     (`solid_unfocused`, on by default): off, a subclass on the window
     (`files_win::shell::keep_backdrop`, installed by `set_acrylic`) passes
     WM_NCACTIVATE as active, so DWM keeps the acrylic; GPUI's own focus
-    uses WM_ACTIVATE. Unverified on screen yet.
+    uses WM_ACTIVATE. Unverified on screen yet. In search results the
+    Location cell is a link: it closes the search, opens that folder and
+    selects the item (`Explorer::reveal`, next to `pending_rename`).
 18. **Next:** the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1) and
     whatever the owner finds at work.
 
