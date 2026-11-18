@@ -340,6 +340,10 @@ pub mod settings {
         pub columns: Vec<String>,
         /// Column widths in px by column name, as last dragged.
         pub widths: Vec<(String, f32)>,
+        /// The backdrop turns solid while the window is not active, as Windows does.
+        pub solid_unfocused: bool,
+        /// Sidebar groups shown folded, by name ("*drives" for the drives).
+        pub collapsed: Vec<String>,
     }
 
     impl Default for Settings {
@@ -356,6 +360,8 @@ pub mod settings {
                 backspace_back: true,
                 columns: vec!["size".into(), "modified".into(), "type".into()],
                 widths: Vec::new(),
+                solid_unfocused: true,
+                collapsed: Vec::new(),
             }
         }
     }
@@ -384,6 +390,7 @@ pub mod settings {
                 "restore_tabs" => s.restore_tabs = value != "false",
                 "show_hidden" => s.show_hidden = value == "true",
                 "backspace_back" => s.backspace_back = value != "false",
+                "solid_unfocused" => s.solid_unfocused = value != "false",
                 "columns" => {
                     s.columns = value
                         .split(',')
@@ -402,6 +409,14 @@ pub mod settings {
                                 w.trim().parse::<f32>().ok()?.clamp(40., 2000.),
                             ))
                         })
+                        .collect()
+                }
+                // shortcut: a group name with "|" splits in two, rename it if that matters.
+                "collapsed" => {
+                    s.collapsed = value
+                        .split('|')
+                        .filter(|n| !n.is_empty())
+                        .map(String::from)
                         .collect()
                 }
                 "fonts" => {
@@ -427,10 +442,12 @@ pub mod settings {
         );
         text += &format!("show_hidden={}\r\n", s.show_hidden);
         text += &format!("backspace_back={}\r\n", s.backspace_back);
+        text += &format!("solid_unfocused={}\r\n", s.solid_unfocused);
         text += &format!("tab_style={}\r\n", s.tab_style);
         text += &format!("columns={}\r\n", s.columns.join(","));
         let widths: Vec<String> = s.widths.iter().map(|(n, w)| format!("{n}:{w}")).collect();
         text += &format!("widths={}\r\n", widths.join(","));
+        text += &format!("collapsed={}\r\n", s.collapsed.join("|"));
         let [a, b, c] = s.fonts;
         text += &format!("fonts={a} {b} {c}\r\n");
         if let Some(pl) = s.polish {
@@ -470,6 +487,8 @@ pub mod settings {
                 backspace_back: false,
                 columns: vec!["type".into(), "size".into()],
                 widths: vec![("name".into(), 300.), ("type".into(), 120.5)],
+                solid_unfocused: false,
+                collapsed: vec!["*drives".into(), "Work, old".into()],
             };
             assert_eq!(parse(&to_text(&s)), s);
             let w = Settings {

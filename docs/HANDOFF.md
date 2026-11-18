@@ -245,7 +245,23 @@ session reads.
         window rect after editing `settings.txt` / `session.txt` and
         restarting works for checking the look (scratch script, not in the
         repo).
-17. **Next:** the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1) and
+17. **v0.9.0 (branch `search-crumbs`):** opening another folder
+    closes the search (`Explorer::loaded`; a reload of the same folder
+    keeps the filter); Ctrl+F also works from the sidebar, the tabs and
+    the address (a `Workspace` binding calls the active tab's `search`);
+    crumbs no longer shrink: the bar is `justify_end` with a `flex_1`
+    spacer, so in a narrow pane the oldest levels slide out on the left
+    and the current folder stays whole. Sidebar groups fold with a click
+    on their header (chevron); folded ones are kept by name in settings
+    (`collapsed=`, `*drives` for the drives; a rename carries it over).
+    Setting "Solid background when the window is not active"
+    (`solid_unfocused`, on by default): off, a subclass on the window
+    (`files_win::shell::keep_backdrop`, installed by `set_acrylic`) passes
+    WM_NCACTIVATE as active, so DWM keeps the acrylic; GPUI's own focus
+    uses WM_ACTIVATE. Unverified on screen yet. In search results the
+    Location cell is a link: it closes the search, opens that folder and
+    selects the item (`Explorer::reveal`, next to `pending_rename`).
+18. **Next:** the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1) and
     whatever the owner finds at work.
 
 ## Open questions
