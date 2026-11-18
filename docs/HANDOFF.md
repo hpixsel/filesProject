@@ -251,7 +251,9 @@ session reads.
     the address (a `Workspace` binding calls the active tab's `search`);
     crumbs no longer shrink: the bar is `justify_end` with a `flex_1`
     spacer, so in a narrow pane the oldest levels slide out on the left
-    and the current folder stays whole.
+    and the current folder stays whole. Sidebar groups fold with a click
+    on their header (chevron); folded ones are kept by name in settings
+    (`collapsed=`, `*drives` for the drives; a rename carries it over).
 18. **Next:** the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1) and
     whatever the owner finds at work.
 

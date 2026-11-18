@@ -728,13 +728,22 @@ impl Workspace {
                 )
         };
         // A group's header: its name (or the rename field), draggable to move
-        // the group; items and groups dropped on it land there.
-        let header = move |g: usize, name: String, cx: &mut Context<Self>| {
+        // the group; items and groups dropped on it land there; a click
+        // folds or unfolds it.
+        let header = move |g: usize, name: String, folded: bool, cx: &mut Context<Self>| {
+            let chevron = if folded {
+                IconName::ChevronRight
+            } else {
+                IconName::ChevronDown
+            };
             div()
                 .id(("group", g))
                 .flex()
                 .flex_row()
-                .items_end()
+                .items_center()
+                .gap_1()
+                .child(Icon::new(chevron).xsmall())
+                .on_click(cx.listener(move |this, _, _, cx| this.toggle_group(g, cx)))
                 .px_2()
                 .pt_3()
                 .pb_1()
@@ -767,6 +776,7 @@ impl Workspace {
             .px_2()
             .overflow_y_scroll();
         for (g, group) in self.layout.0.iter().enumerate() {
+            let folded = self.folded(g, cx);
             match group {
                 Group::Folders { name, paths } => {
                     let title: AnyElement = match &self.editing_group {
@@ -785,7 +795,7 @@ impl Workspace {
                         tr!("Remove group", "Usuń grupę"),
                     );
                     side = side.child(
-                        header(g, name.clone(), cx)
+                        header(g, name.clone(), folded, cx)
                             .child(title)
                             // Folders dragged from the list onto the name join the group.
                             .drag_over::<DraggedFiles>(move |s, _, _, _| s.bg(hover))
@@ -823,6 +833,9 @@ impl Workspace {
                                 )
                             }),
                     );
+                    if folded {
+                        continue;
+                    }
                     if paths.is_empty() {
                         // An empty group's hint takes drops too: favourites from
                         // other groups, and folders from the list.
@@ -940,7 +953,8 @@ impl Workspace {
     ) -> Stateful<Div> {
         let muted = cx.theme().muted_foreground;
         let title = tr!("Drives", "Dyski");
-        let head = header(g, title.clone(), cx);
+        let folded = self.folded(g, cx);
+        let head = header(g, title.clone(), folded, cx);
         let drive_button = |id: &'static str, icon: IconName, tip: String, map: bool| {
             Button::new(id)
                 .cursor_pointer()
@@ -948,7 +962,10 @@ impl Workspace {
                 .xsmall()
                 .icon(icon)
                 .tooltip(tip)
-                .on_click(cx.listener(move |this, _, w, cx| this.drive_dialog(map, w, cx)))
+                .on_click(cx.listener(move |this, _, w, cx| {
+                    cx.stop_propagation(); // not the header's fold
+                    this.drive_dialog(map, w, cx)
+                }))
         };
         side = side.child(
             head.child(div().flex_1().child(title))
@@ -965,6 +982,9 @@ impl Workspace {
                     false,
                 )),
         );
+        if folded {
+            return side;
+        }
         for (id, label, icon, place) in [
             (
                 "this-pc",
@@ -1021,11 +1041,30 @@ impl Workspace {
         side
     }
 
+    /// Sidebar groups are folded by name; the drives by "*drives".
+    fn folded(&self, g: usize, cx: &App) -> bool {
+        self.layout
+            .0
+            .get(g)
+            .is_some_and(|group| prefs::get(cx).collapsed.contains(&group_key(group)))
+    }
+
+    fn toggle_group(&mut self, g: usize, cx: &mut Context<Self>) {
+        let Some(key) = self.layout.0.get(g).map(group_key) else {
+            return;
+        };
+        prefs::set(cx, |s| match s.collapsed.iter().position(|c| *c == key) {
+            Some(i) => _ = s.collapsed.remove(i),
+            None => s.collapsed.push(key),
+        });
+    }
+
     /// A group's name becomes editable; Enter or clicking away keeps it.
     fn start_group_rename(&mut self, g: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Group::Folders { name, .. }) = self.layout.0.get(g) else {
             return;
         };
+        let old = name.clone();
         let input = cx.new(|cx| InputState::new(window, cx).default_value(name.clone()));
         cx.subscribe_in(
             &input,
@@ -1034,6 +1073,15 @@ impl Workspace {
                 if matches!(ev, InputEvent::PressEnter { .. } | InputEvent::Blur) {
                     let name = input.read(cx).value().trim().to_string();
                     if !name.is_empty() {
+                        // A folded group stays folded under its new name.
+                        if name != old && prefs::get(cx).collapsed.contains(&old) {
+                            prefs::set(cx, |s| {
+                                s.collapsed
+                                    .iter_mut()
+                                    .filter(|c| **c == old)
+                                    .for_each(|c| *c = name.clone())
+                            });
+                        }
                         this.layout.rename_group(g, name);
                         this.save_favourites();
                     }
@@ -1446,8 +1494,15 @@ impl Render for DraggedTab {
     }
 }
 
-/// Builds a sidebar group header (index, name).
-type HeaderFn = dyn Fn(usize, String, &mut Context<Workspace>) -> Stateful<Div>;
+fn group_key(group: &Group) -> String {
+    match group {
+        Group::Folders { name, .. } => name.clone(),
+        Group::Drives => "*drives".into(),
+    }
+}
+
+/// Builds a sidebar group header (index, name, folded).
+type HeaderFn = dyn Fn(usize, String, bool, &mut Context<Workspace>) -> Stateful<Div>;
 /// Builds a sidebar entry (id, label, icon, where it goes).
 type EntryFn =
     dyn Fn(SharedString, String, Icon, PathBuf, &mut Context<Workspace>) -> Stateful<Div>;
