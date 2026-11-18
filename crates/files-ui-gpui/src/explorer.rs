@@ -1002,6 +1002,8 @@ pub struct Explorer {
     editing_address: bool,
     /// The search field (Ctrl+F) while it is open.
     search: Option<Entity<InputState>>,
+    /// The folder the list shows; a different one closes the search.
+    loaded: PathBuf,
     /// Stops a search in subfolders that is still running.
     search_stop: Arc<AtomicBool>,
     /// Watches the folder on disk; `dirty` is set when it changes.
@@ -1139,6 +1141,7 @@ impl Explorer {
             pending_rename: None,
             editing_address: false,
             search: None,
+            loaded: PathBuf::new(),
             search_stop: Default::default(),
             watch: None,
             dirty: Default::default(),
@@ -1168,6 +1171,11 @@ impl Explorer {
         let place = Place::of(&dir);
         // A new folder ends a running search in subfolders.
         self.search_stop.store(true, Ordering::SeqCst);
+        // Opening another folder shows all of it; a reload of this one keeps the filter.
+        if self.loaded != dir && self.search.take().is_some() {
+            self.focus.focus(window, cx);
+        }
+        self.loaded = dir.clone();
         let filter = self
             .search
             .as_ref()
@@ -1966,6 +1974,10 @@ impl Explorer {
             .flex_row()
             .items_center()
             .gap_0p5()
+            // In a narrow pane the oldest levels slide out on the left, so
+            // the current folder stays in view; the spacer at the end keeps
+            // a short path on the left.
+            .justify_end()
             .overflow_hidden()
             .rounded(radius)
             .border_1()
@@ -1977,7 +1989,7 @@ impl Explorer {
         for (ix, (name, path)) in levels.into_iter().enumerate() {
             if ix > 0 && ix <= hidden {
                 if ix == 1 {
-                    bar = bar.child(div().px_1().text_color(muted).child("…"));
+                    bar = bar.child(div().flex_shrink_0().px_1().text_color(muted).child("…"));
                 }
                 continue;
             }
@@ -1993,15 +2005,7 @@ impl Explorer {
             bar = bar.child(
                 div()
                     .id(("crumb", ix))
-                    // In a narrow pane the levels above shrink to "…", so
-                    // the current folder stays in view.
-                    .map(|s| {
-                        if ix == last {
-                            s.flex_shrink_0()
-                        } else {
-                            s.min_w(px(28.)).truncate()
-                        }
-                    })
+                    .flex_shrink_0()
                     .px_2()
                     .py_0p5()
                     .rounded(radius)
@@ -2030,12 +2034,12 @@ impl Explorer {
                     .child(name),
             );
         }
-        bar
+        bar.child(div().flex_1())
     }
 
     /// Ctrl+F: a search field. Typing filters this folder; Enter also
     /// searches its subfolders.
-    fn search(&mut self, _: &Search, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn search(&mut self, _: &Search, window: &mut Window, cx: &mut Context<Self>) {
         let input = match &self.search {
             // Ctrl+F again in the field closes it.
             Some(i) if i.focus_handle(cx).is_focused(window) => {

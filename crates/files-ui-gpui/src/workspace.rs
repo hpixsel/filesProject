@@ -46,6 +46,8 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-f6", OtherPane, Some(CONTEXT)),
         KeyBinding::new("ctrl-d", ToggleFavourite, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-p", OpenPalette, Some(CONTEXT)),
+        // Ctrl+F from the sidebar, the tabs or the address; the list handles it itself.
+        KeyBinding::new("ctrl-f", explorer::Search, Some(CONTEXT)),
     ]);
 }
 
@@ -1379,6 +1381,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::other_pane))
             .on_action(cx.listener(Self::toggle_favourite))
             .on_action(cx.listener(Self::open_palette))
+            .on_action(cx.listener(|this, a: &explorer::Search, window, cx| {
+                this.active().update(cx, |e, cx| e.search(a, window, cx))
+            }))
             .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
             )
