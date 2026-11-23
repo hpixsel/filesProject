@@ -261,7 +261,11 @@ session reads.
     uses WM_ACTIVATE. Unverified on screen yet. In search results the
     Location cell is a link: it closes the search, opens that folder and
     selects the item (`Explorer::reveal`, next to `pending_rename`).
-18. **Next:** the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1) and
+18. **v0.9.1 (branch `rename-field`):** the in-row rename field is the
+    kit's Input with `appearance(false)` inside a 1px accent frame; its
+    margins (`ml -4`, `my -1`) take the frame back, so the row does not
+    shift (measured on screenshots at compact density).
+19. **Next:** the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1) and
     whatever the owner finds at work.
 
 ## Open questions
