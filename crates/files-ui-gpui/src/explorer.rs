@@ -13,7 +13,7 @@ use gpui_kit::component::table::*;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::BufRead;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -905,12 +905,16 @@ impl TableDelegate for Listing {
             Col::Name => {
                 let (icon, color) = item_icon(item, cx.theme().primary, muted);
                 let own = self.icons.lock().unwrap().get(&item.path).cloned();
-                let cell = div().h_flex().gap_2().child(match own {
-                    Some(picture) => img(ImageSource::Render(picture))
-                        .size_4()
-                        .into_any_element(),
-                    None => icon.text_color(color).into_any_element(),
-                });
+                let cell = div()
+                    .h_flex()
+                    .gap_2()
+                    .when(is_cut(&item.path), |d| d.opacity(0.5))
+                    .child(match own {
+                        Some(picture) => img(ImageSource::Render(picture))
+                            .size_4()
+                            .into_any_element(),
+                        None => icon.text_color(color).into_any_element(),
+                    });
                 match &self.renaming {
                     Some((path, input)) if *path == item.path => {
                         let me = self.explorer.clone();
@@ -1004,6 +1008,20 @@ impl TableDelegate for Listing {
                     .unwrap_or_default(),
             ),
         }
+    }
+}
+
+/// The items last cut (Ctrl+X) and the clipboard's sequence number then;
+/// they show faded until anything else lands on the clipboard.
+// shortcut: other tabs and a clipboard change show it at their next redraw, not at once.
+static CUT: Mutex<Option<(u32, HashSet<PathBuf>)>> = Mutex::new(None);
+
+fn is_cut(path: &Path) -> bool {
+    match &*CUT.lock().unwrap() {
+        Some((seq, paths)) => {
+            paths.contains(path) && *seq == files_win::fileop::clipboard_sequence()
+        }
+        None => false,
     }
 }
 
@@ -1426,6 +1444,11 @@ impl Explorer {
         }
         let result = files_win::Sta::new()
             .and_then(|sta| files_win::fileop::set_clipboard(&sta, &paths, cut));
+        *CUT.lock().unwrap() = (cut && result.is_ok()).then(|| {
+            let seq = files_win::fileop::clipboard_sequence();
+            (seq, paths.iter().cloned().collect())
+        });
+        self.table.update(cx, |_, cx| cx.notify());
         let what = match &paths[..] {
             [one] => one
                 .file_name()
@@ -1814,6 +1837,7 @@ impl Explorer {
                             .flex()
                             .items_center()
                             .justify_center()
+                            .when(is_cut(&item.path), |d| d.opacity(0.5))
                             .child(face),
                     )
                     .child(

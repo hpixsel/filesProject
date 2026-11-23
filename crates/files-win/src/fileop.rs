@@ -11,7 +11,9 @@ use windows::Win32::Foundation::{E_ABORT, HWND, S_OK};
 use windows::Win32::System::Com::{
     CoCreateInstance, IDataObject, CLSCTX_ALL, FORMATETC, STGMEDIUM,
 };
-use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
+use windows::Win32::System::DataExchange::{
+    GetClipboardSequenceNumber, IsClipboardFormatAvailable,
+};
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Ole::{OleFlushClipboard, OleGetClipboard, OleSetClipboard, CF_HDROP};
 use windows::Win32::UI::Shell::{
@@ -170,6 +172,12 @@ fn item(path: &Path) -> Result<IShellItem> {
 pub fn clipboard_has_paths() -> bool {
     // SAFETY: a plain query; it does not open the clipboard.
     unsafe { IsClipboardFormatAvailable(u32::from(CF_HDROP.0)).is_ok() }
+}
+
+/// Changes whenever anything puts something on the clipboard.
+pub fn clipboard_sequence() -> u32 {
+    // SAFETY: a plain query.
+    unsafe { GetClipboardSequenceNumber() }
 }
 
 /// The items as one shell item array (they share a folder).
