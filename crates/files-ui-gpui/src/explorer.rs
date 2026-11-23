@@ -931,7 +931,8 @@ impl TableDelegate for Listing {
                                 // A thin accent frame instead of the kit's field and
                                 // focus ring, pulled left by its padding and border
                                 // so the name stays put.
-                                .ml(px(-5.))
+                                .ml(px(-4.))
+                                .my(px(-1.))
                                 .px_1()
                                 .rounded(px(4.))
                                 .border_1()
