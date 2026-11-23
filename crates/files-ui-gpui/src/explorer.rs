@@ -928,10 +928,21 @@ impl TableDelegate for Listing {
                                         cx.stop_propagation();
                                     }
                                 })
-                                // The table's text size, and pulled left by the
-                                // field's padding and border so the name stays put.
-                                .ml(-(input_size.input_px() + px(1.)))
-                                .child(Input::new(input).with_size(input_size)),
+                                // A thin accent frame instead of the kit's field and
+                                // focus ring, pulled left by its padding and border
+                                // so the name stays put.
+                                .ml(px(-5.))
+                                .px_1()
+                                .rounded(px(4.))
+                                .border_1()
+                                .border_color(cx.theme().primary)
+                                .bg(cx.theme().background)
+                                .child(
+                                    Input::new(input)
+                                        .appearance(false)
+                                        .with_size(input_size)
+                                        .px_0(),
+                                ),
                         )
                     }
                     _ => cell.child(item.name.clone()),
