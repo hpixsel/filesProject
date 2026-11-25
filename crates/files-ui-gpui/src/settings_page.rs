@@ -118,6 +118,16 @@ fn page(picker: Entity<ColorPickerState>) -> Settings {
                         ),
                     ),
                     SettingItem::new(
+                        tr!(
+                            "Coloured file icons (Material Icon Theme)",
+                            "Kolorowe ikony plików (Material Icon Theme)"
+                        ),
+                        SettingField::switch(
+                            |cx| prefs::get(cx).material_icons,
+                            |v, cx| prefs::set(cx, |s| s.material_icons = v),
+                        ),
+                    ),
+                    SettingItem::new(
                         tr!("Tabs", "Karty"),
                         SettingField::dropdown(
                             options(&[

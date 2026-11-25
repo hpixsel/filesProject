@@ -913,6 +913,11 @@ impl TableDelegate for Listing {
                         Some(picture) => img(ImageSource::Render(picture))
                             .size_4()
                             .into_any_element(),
+                        None if crate::prefs::get(cx).material_icons => {
+                            img(crate::assets::material_icon(&item.name, item.is_dir))
+                                .size_4()
+                                .into_any_element()
+                        }
                         None => icon.text_color(color).into_any_element(),
                     });
                 match &self.renaming {
@@ -1779,6 +1784,7 @@ impl Explorer {
         };
         let thumbs = self.thumbs.lock().unwrap();
         let icons = l.icons.lock().unwrap();
+        let material = crate::prefs::get(cx).material_icons;
         let width = self.grid_width.clone();
         let mut grid = div()
             .id("grid")
@@ -1811,6 +1817,9 @@ impl Explorer {
                     .max_w(px(128.))
                     .max_h(px(128.))
                     .object_fit(ObjectFit::Contain)
+                    .into_any_element(),
+                None if material => img(crate::assets::material_icon(&item.name, item.is_dir))
+                    .size_16()
                     .into_any_element(),
                 None => icon.size_16().text_color(color).into_any_element(),
             };
