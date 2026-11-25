@@ -268,7 +268,7 @@ session reads.
 19. **v0.9.2 (branch `cut-marks`):** cut items (Ctrl+X) show faded
     in the list and the grid until anything else lands on the clipboard
     (`explorer::CUT` with `fileop::clipboard_sequence`).
-20. **After v0.9.2 (branch `material-icons`):** setting "Coloured file
+20. **v0.10.0 (branch `material-icons`):** setting "Coloured file
     icons (Material Icon Theme)" (`material_icons`, off by default). The
     theme's dark SVGs that its mapping uses (MIT, ~860, ~0.7 MB) and a
     trimmed `map.txt` live in `assets/material`, made by
