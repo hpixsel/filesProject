@@ -268,7 +268,16 @@ session reads.
 19. **v0.9.2 (branch `cut-marks`):** cut items (Ctrl+X) show faded
     in the list and the grid until anything else lands on the clipboard
     (`explorer::CUT` with `fileop::clipboard_sequence`).
-20. **Next:** the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1) and
+20. **After v0.9.2 (branch `material-icons`):** setting "Coloured file
+    icons (Material Icon Theme)" (`material_icons`, off by default). The
+    theme's dark SVGs that its mapping uses (MIT, ~860, ~0.7 MB) and a
+    trimmed `map.txt` live in `assets/material`, made by
+    `tools/material_icons.py` from the npm package (5.40.0); `build.rs`
+    embeds them, `assets::material_icon` picks one like VS Code (whole
+    name, then the longest extension). Drawn with `img` (colour), in the
+    list and the grid; Windows' own icons for programs and shortcuts
+    still win. Light-mode variants are not used.
+21. **Next:** the remaining M0 checks (CUJ 6, Q6, G2 typeperf, Q1) and
     whatever the owner finds at work.
 
 ## Open questions

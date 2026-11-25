@@ -340,6 +340,8 @@ pub mod settings {
         pub columns: Vec<String>,
         /// Column widths in px by column name, as last dragged.
         pub widths: Vec<(String, f32)>,
+        /// Coloured file and folder icons from Material Icon Theme.
+        pub material_icons: bool,
         /// The backdrop turns solid while the window is not active, as Windows does.
         pub solid_unfocused: bool,
         /// Sidebar groups shown folded, by name ("*drives" for the drives).
@@ -360,6 +362,7 @@ pub mod settings {
                 backspace_back: true,
                 columns: vec!["size".into(), "modified".into(), "type".into()],
                 widths: Vec::new(),
+                material_icons: false,
                 solid_unfocused: true,
                 collapsed: Vec::new(),
             }
@@ -391,6 +394,7 @@ pub mod settings {
                 "show_hidden" => s.show_hidden = value == "true",
                 "backspace_back" => s.backspace_back = value != "false",
                 "solid_unfocused" => s.solid_unfocused = value != "false",
+                "material_icons" => s.material_icons = value == "true",
                 "columns" => {
                     s.columns = value
                         .split(',')
@@ -443,6 +447,7 @@ pub mod settings {
         text += &format!("show_hidden={}\r\n", s.show_hidden);
         text += &format!("backspace_back={}\r\n", s.backspace_back);
         text += &format!("solid_unfocused={}\r\n", s.solid_unfocused);
+        text += &format!("material_icons={}\r\n", s.material_icons);
         text += &format!("tab_style={}\r\n", s.tab_style);
         text += &format!("columns={}\r\n", s.columns.join(","));
         let widths: Vec<String> = s.widths.iter().map(|(n, w)| format!("{n}:{w}")).collect();
@@ -487,6 +492,7 @@ pub mod settings {
                 backspace_back: false,
                 columns: vec!["type".into(), "size".into()],
                 widths: vec![("name".into(), 300.), ("type".into(), 120.5)],
+                material_icons: true,
                 solid_unfocused: false,
                 collapsed: vec!["*drives".into(), "Work, old".into()],
             };
